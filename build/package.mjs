@@ -48,7 +48,16 @@ const IGNORE = [/^\/(?!package\.json$|desktop(?:\/|$)|assets(?:\/|$))/];
 // extraResource：物化到 resources/<name>/ 磁盘目录（Python 需读写文件，不放 asar）。
 // python/ 是精简 CPython 运行时（build/portable_runtime.py 裁剪），缺了就用系统 Python 兜底。
 const staging = join(ROOT, 'analysis', `package-v${metadata.version}-${Date.now()}`);
+const appStage = join(staging, 'app');
 const hubStage = join(staging, 'hub');
+const buildTemp = join(ROOT, 'analysis', 'build-tmp');
+await mkdir(appStage, { recursive: true });
+await mkdir(buildTemp, { recursive: true });
+process.env.TEMP = buildTemp;
+process.env.TMP = buildTemp;
+await copyFile(join(ROOT, 'package.json'), join(appStage, 'package.json'));
+await cp(join(ROOT, 'desktop'), join(appStage, 'desktop'), { recursive: true });
+await cp(join(ROOT, 'assets'), join(appStage, 'assets'), { recursive: true });
 await mkdir(hubStage, { recursive: true });
 for (const entry of await readdir(join(ROOT, 'hub'), { withFileTypes: true })) {
   if (entry.isFile() && (/^wb_[A-Za-z0-9_]+\.py$/.test(entry.name) || entry.name === 'dashboard.html')) {
@@ -73,13 +82,15 @@ if (existsSync(join('python', 'python.exe'))) {
 
 const started = Date.now();
 const out = await packager({
-  dir: '.',
+  dir: appStage,
   name: 'WorkBuddy Gateway',
   platform: 'win32',
   arch: 'x64',
   out: outDir,
   overwrite: false,
-  prune: true,
+  prune: false,
+  electronVersion: JSON.parse(readFileSync(join(ROOT, 'node_modules', 'electron', 'package.json'), 'utf8')).version,
+  tmpdir: buildTemp,
   asar: true,
   icon: 'assets/icon.ico',
   appVersion: metadata.version,
