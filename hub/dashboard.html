@@ -1310,6 +1310,42 @@ html[data-theme-style="cyber"] .dot{animation:cyberPulse 2.4s ease-in-out infini
   html[data-theme-style="cyber"] body{background-attachment:scroll}
 }
 
+/* TRAE stays an independent provider surface and inherits the active HUD tokens. */
+#pageTrae{min-width:0}
+#pageTrae .trae-header{display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:12px;margin-bottom:16px}
+#pageTrae .trae-header h2{margin:0;font-size:17px;color:var(--fg)}
+#pageTrae .trae-note{color:var(--dim);font-size:12px;margin:6px 0;overflow-wrap:anywhere}
+#pageTrae .trae-status{min-height:24px;margin-bottom:12px;font-size:12px;color:var(--dim);overflow-wrap:anywhere}
+#pageTrae .trae-status.error{color:var(--bad)}
+#pageTrae .trae-stats{grid-template-columns:repeat(4,minmax(0,1fr));margin-bottom:16px}
+#pageTrae .trae-account-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,300px),1fr));gap:12px}
+#pageTrae .trae-account{border:1px solid var(--line);border-radius:var(--radius-card);background:var(--panel2);padding:14px;min-width:0}
+#pageTrae .trae-account-head{display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:8px}
+#pageTrae .trae-account-name{font-weight:600;overflow-wrap:anywhere;min-width:0}
+#pageTrae .trae-account-credit{font-size:24px;font-weight:700;font-variant-numeric:tabular-nums;margin:8px 0}
+#pageTrae .trae-account-error{color:var(--bad);font-size:12px;overflow-wrap:anywhere;margin:8px 0}
+#pageTrae .trae-account .toolbar{margin-bottom:0}
+#pageTrae .trae-import{margin-top:16px;border-top:1px solid var(--line);padding-top:12px}
+#pageTrae .trae-import summary{cursor:pointer;font-weight:600;padding:6px 0}
+#pageTrae .trae-import-form{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,2fr) auto;gap:12px;align-items:end;margin-top:12px}
+#pageTrae .trae-import-form label{display:flex;flex-direction:column;gap:6px;color:var(--dim);font-size:12px;min-width:0}
+#pageTrae .trae-import-form input{width:100%;min-width:0}
+#pageTrae button.danger{background:var(--bad-soft);background-image:none;color:var(--bad);border-color:var(--danger-border);box-shadow:none}
+#pageTrae button.danger:hover{background:var(--bad);color:#fff;border-color:var(--bad)}
+#pageTrae .trae-empty{border:1px dashed var(--line);border-radius:var(--radius-control);padding:22px 16px;color:var(--dim);overflow-wrap:anywhere}
+#pageTrae .trae-model-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,300px),1fr));gap:10px}
+#pageTrae .trae-model{display:flex;align-items:center;gap:10px;justify-content:space-between;border:1px solid var(--line);border-radius:var(--radius-control);padding:12px;min-width:0}
+#pageTrae .trae-model-info{min-width:0;overflow-wrap:anywhere}
+#pageTrae .trae-model button{flex-shrink:0}
+#pageTrae .trae-endpoint{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:14px;min-width:0}
+#pageTrae .trae-endpoint code{overflow-wrap:anywhere;min-width:0;max-width:100%}
+#pageTrae button:focus-visible,#pageTrae input:focus-visible,#pageTrae summary:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+@media(max-width:640px){
+  #pageTrae .trae-stats{grid-template-columns:repeat(2,minmax(0,1fr))}
+  #pageTrae .trae-import-form{grid-template-columns:minmax(0,1fr)}
+  #pageTrae .trae-stats .card{padding:12px}
+  #pageTrae .trae-stats .card .v{font-size:20px}
+}
 </style>
 <script>
 /* Runs before <body> is parsed, so the page the user last had is the
@@ -1512,7 +1548,7 @@ html[data-theme-style="cyber"] .dot{animation:cyberPulse 2.4s ease-in-out infini
   };
 
   // 3. Tab 初始化（与下方主脚本的 MAIN_TABS 保持一致）
-  var TABS = ['gateway','accounts','tasks','analytics','agents','settings','logs'];
+  var TABS = ['gateway','accounts','tasks','analytics','agents','settings','logs','trae'];
   var pick = null;
   try {
     var q = new URLSearchParams(location.search).get('tab');
@@ -1541,6 +1577,56 @@ html[data-theme-style="cyber"] .dot{animation:cyberPulse 2.4s ease-in-out infini
   var ATTRS = ['title', 'placeholder', 'aria-label', 'data-label', 'alt'];
   var SKIP = {SCRIPT: 1, STYLE: 1, TEXTAREA: 1, NOSCRIPT: 1};
   var DICT = {
+    'TRAE 独立上游': 'TRAE provider',
+    'TRAE 账号': 'TRAE accounts',
+    'TRAE 积分': 'TRAE credits',
+    '账号积分池参考，模型权益以 TRAE 为准': 'Account credit-pool reference only; model entitlements are determined by TRAE',
+    '部分查询未完成，请查看账号提示。': 'Some queries did not complete. Check the account notices below.',
+    '部分查询失败': 'Some queries failed',
+    '登录已失效': 'Login expired',
+    '上游服务错误': 'Upstream service error',
+    '请求受限': 'Rate limited',
+    '在 TRAE 内刷新后重新同步': 'Refresh the login in TRAE, then sync again',
+    '额度查询失败': 'Credit query failed',
+    '模型查询失败': 'Model query failed',
+    '登录有效期': 'Login expiry',
+    '最近积分期限': 'Nearest credit expiry',
+    'TRAE 模型': 'TRAE models',
+    '独立管理 TRAE 登录、额度与模型，不与 WorkBuddy 账号或积分合并。': 'Manage TRAE accounts, credits and models separately from WorkBuddy.',
+    '已记录积分合计': 'Recorded credits total',
+    '仅统计已查询的 TRAE 账号': 'Only TRAE accounts with recorded credits are counted',
+    '未查询账号': 'Accounts not queried',
+    '可用模型数': 'Available models',
+    '本机 TRAE 客户端': 'Local TRAE client',
+    '未检测到客户端': 'Client not detected',
+    '客户端版本未知': 'Client version unknown',
+    '扫描本机 TRAE': 'Scan local TRAE',
+    '刷新额度 / 模型': 'Refresh credits / models',
+    '重新读取状态': 'Reload status',
+    '点击扫描仅导入本机已登录的 TRAE；刷新仅查询额度和模型，不发送对话。': 'Scan imports the locally signed-in TRAE account. Refresh only queries credits and models, without sending chats.',
+    '还没有 TRAE 账号。请先登录本机 TRAE，再点击“扫描本机 TRAE”。': 'No TRAE accounts yet. Sign in to the local TRAE client, then choose Scan local TRAE.',
+    '手动导入登录凭据': 'Import a login credential manually',
+    '账号备注': 'Account label',
+    '例如：我的 TRAE': 'For example: My TRAE',
+    'TRAE 登录凭据': 'TRAE login credential',
+    '凭据仅提交给本地网关，不保存在浏览器中；提交后立即清空。': 'The credential is sent only to the local gateway, never saved in the browser, and cleared immediately after submission.',
+    '导入账号': 'Import account',
+    '请填写 TRAE 登录凭据': 'Enter a TRAE login credential',
+    '导入后请手动刷新额度和模型。': 'Refresh credits and models manually after importing.',
+    '加载 TRAE 状态中…': 'Loading TRAE status…',
+    '正在处理 TRAE 操作…': 'Processing TRAE request…',
+    'TRAE 操作已完成': 'TRAE request completed',
+    'TRAE 状态读取失败': 'Failed to load TRAE status',
+    'TRAE 操作失败': 'TRAE request failed',
+    '上次读取失败，下面保留的是此前状态。': 'The last load failed. The previously loaded state is shown below.',
+    '未查询': 'Not queried',
+    '未查询 / 已导入': 'Not queried / imported',
+    '暂无模型。导入账号后点击“刷新额度 / 模型”。': 'No models yet. Import an account, then choose Refresh credits / models.',
+    '使用同一 OpenAI 兼容地址，模型 ID 保留 trae/ 前缀。': 'Use the same OpenAI-compatible base URL and keep the trae/ model prefix.',
+    '复制模型 ID': 'Copy model ID',
+    '复制 Base URL': 'Copy base URL',
+    '读取成功': 'Loaded',
+    '移除 TRAE 账号？登录凭据将从可用账号池中移除，服务端保留可恢复备份。': 'Remove this TRAE account? The credential will be removed from the active pool; the server retains a recoverable backup.',
     '(不限)': '(unlimited)',
     '(仅桌面端对话)': '(desktop chats only)',
     '(低于': '(below',
@@ -2997,6 +3083,9 @@ html[data-theme-style="cyber"] .dot{animation:cyberPulse 2.4s ease-in-out infini
       <button class="main-nav-btn" id="btnNavAccounts" onclick="switchMainTab('accounts')">
         账号
       </button>
+      <button class="main-nav-btn" id="btnNavTrae" onclick="switchMainTab('trae')">
+        TRAE
+      </button>
       <button class="main-nav-btn" id="btnNavTasks" onclick="switchMainTab('tasks')">
         任务与福利
       </button>
@@ -3373,6 +3462,49 @@ html[data-theme-style="cyber"] .dot{animation:cyberPulse 2.4s ease-in-out infini
   </section>
   </div><!-- /pageAccounts -->
   
+  <div id="pageTrae" class="main-page" aria-labelledby="traePageTitle">
+    <div class="trae-header">
+      <div>
+        <h2 id="traePageTitle">TRAE 独立上游</h2>
+        <p class="trae-note">独立管理 TRAE 登录、额度与模型，不与 WorkBuddy 账号或积分合并。</p>
+        <p class="trae-note">账号积分池参考，模型权益以 TRAE 为准</p>
+      </div>
+      <button type="button" class="sec" data-trae-action onclick="loadTraeProvider()">重新读取状态</button>
+    </div>
+    <div id="traeActionStatus" class="trae-status" role="status" aria-live="polite"></div>
+    <div class="cards trae-stats">
+      <div class="card"><div class="k">TRAE 账号</div><div class="v" id="traeAccountCount">—</div><div class="s" id="traeEnabledCount">—</div></div>
+      <div class="card accent"><div class="k">已记录积分合计</div><div class="v" id="traeCreditTotal">未查询</div><div class="s">仅统计已查询的 TRAE 账号</div></div>
+      <div class="card"><div class="k">未查询账号</div><div class="v" id="traeUnknownCount">—</div><div class="s">TRAE 积分</div></div>
+      <div class="card"><div class="k">可用模型数</div><div class="v" id="traeModelCount">—</div><div class="s" id="traeClientVersion">本机 TRAE 客户端</div></div>
+    </div>
+    <section id="traeAccountsSection">
+      <h2>TRAE 账号</h2>
+      <div class="toolbar">
+        <button type="button" data-trae-action onclick="traeProviderAction('scan', {})">扫描本机 TRAE</button>
+        <button type="button" class="sec" data-trae-action onclick="traeProviderAction('refresh', {})">刷新额度 / 模型</button>
+      </div>
+      <p class="trae-note">点击扫描仅导入本机已登录的 TRAE；刷新仅查询额度和模型，不发送对话。</p>
+      <div id="traeAccounts" class="trae-account-grid"><div class="trae-empty">加载 TRAE 状态中…</div></div>
+      <details class="trae-import">
+        <summary>手动导入登录凭据</summary>
+        <form class="trae-import-form" id="traeImportForm" autocomplete="off" onsubmit="importTraeProvider(event)">
+          <label for="traeImportLabel">账号备注<input class="slot-input" id="traeImportLabel" type="text" maxlength="80" placeholder="例如：我的 TRAE" autocomplete="off"></label>
+          <label for="traeImportToken">TRAE 登录凭据<input class="slot-input" id="traeImportToken" type="password" autocomplete="off" spellcheck="false" required></label>
+          <button type="submit" data-trae-action>导入账号</button>
+        </form>
+        <p class="trae-note">凭据仅提交给本地网关，不保存在浏览器中；提交后立即清空。</p>
+        <p class="trae-note">导入后请手动刷新额度和模型。</p>
+      </details>
+    </section>
+    <section id="traeModelsSection">
+      <h2>TRAE 模型</h2>
+      <p class="trae-note">使用同一 OpenAI 兼容地址，模型 ID 保留 trae/ 前缀。</p>
+      <div class="trae-endpoint"><code class="mono" id="traeBaseUrl" data-no-i18n></code><button type="button" class="sec" onclick="copyTraeValue(document.getElementById('traeBaseUrl').textContent)">复制 Base URL</button></div>
+      <div id="traeModels" class="trae-model-list"><div class="trae-empty">暂无模型。导入账号后点击“刷新额度 / 模型”。</div></div>
+    </section>
+  </div><!-- /pageTrae -->
+
   <div id="pageTasks" class="main-page">
   <!-- 页面头部：标题 + 一行说明，与其它页面的头部结构保持一致 -->
   <div style="margin-bottom:16px">
@@ -9042,7 +9174,7 @@ function generatePageList(current, total){
 
 // Tab ids in nav order. One list so the restore path and the nav cannot
 // drift apart.
-const MAIN_TABS = ['gateway', 'accounts', 'tasks', 'analytics', 'agents', 'settings', 'logs'];
+const MAIN_TABS = ['gateway', 'accounts', 'tasks', 'analytics', 'agents', 'settings', 'logs', 'trae'];
 const MAIN_TAB_STORE = 'wb-proxy-main-tab';
 let currentMainTab = 'gateway';
 let analyticsRange = 'today';
@@ -11945,6 +12077,183 @@ async function loadAgentsAvailability(){
   } catch(e){}
 }
 
+/* ---- TRAE provider: independent data, explicit upstream reads, no chat probes ---- */
+let TRAE_DATA = null;
+let TRAE_BUSY = false;
+
+function traeText(text){
+  return window.WB_I18N && window.WB_I18N.current() === 'en'
+    ? window.WB_I18N.translate(text) : text;
+}
+
+function traeCredits(value){
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function traeSummary(data){
+  const accounts = Array.isArray(data && data.accounts) ? data.accounts : [];
+  const credits = accounts.map(a => traeCredits(a.credits)).filter(n => n !== null);
+  return {accounts: accounts.length, enabled: accounts.filter(a => a.enabled).length,
+    total: credits.length ? credits.reduce((a,b) => a + b, 0) : null,
+    unknown: accounts.length - credits.length};
+}
+
+function traeSetStatus(message, isError){
+  const el = document.getElementById('traeActionStatus');
+  if(!el) return;
+  el.textContent = message;
+  el.classList.toggle('error', !!isError);
+}
+
+function traeSetBusy(busy){
+  TRAE_BUSY = busy;
+  const page = document.getElementById('pageTrae');
+  page.setAttribute('aria-busy', busy ? 'true' : 'false');
+  page.querySelectorAll('[data-trae-action],.trae-import-form input').forEach(el => { el.disabled = busy; });
+}
+
+function traeCreditLabel(value){
+  const credit = traeCredits(value);
+  return credit === null ? traeText('未查询') : credit.toLocaleString(undefined, {maximumFractionDigits:6});
+}
+
+function traeDate(value){
+  if(!value) return new Date(NaN);
+  let number = typeof value === 'number' ? value : (/^\d+(?:\.\d+)?$/.test(String(value || '')) ? Number(value) : NaN);
+  return Number.isFinite(number) ? new Date(number < 1e12 ? number * 1000 : number) : new Date(value);
+}
+
+function traeTime(value){
+  const date = traeDate(value);
+  return Number.isFinite(date.getTime()) ? date.toLocaleString() : '';
+}
+
+function traeResultStatus(success){
+  const accounts = TRAE_DATA ? TRAE_DATA.accounts : [];
+  if(accounts.some(a => a.status === 'login_expired')){
+    traeSetStatus(traeText('登录已失效') + ' · ' + traeText('在 TRAE 内刷新后重新同步'), true);
+  }else if(accounts.some(a => a.status === 'partial' || a.quotaError || a.modelError)){
+    traeSetStatus(traeText('部分查询未完成，请查看账号提示。'), true);
+  }else{
+    traeSetStatus(traeText(success));
+  }
+}
+
+function renderTraeProvider(data){
+  // Never put credentials in renderer state, DOM attributes or browser storage.
+  TRAE_DATA = {
+    accounts: (Array.isArray(data.accounts) ? data.accounts : []).filter(a => a && typeof a.id === 'string').map(a => ({
+      id:a.id, label:String(a.label || a.id), region:String(a.region || 'cn'), enabled:!!a.enabled,
+      status:String(a.status || 'unknown'), credits:traeCredits(a.credits), lastError:a.lastError ? String(a.lastError) : '',
+      quotaError:a.quotaError ? String(a.quotaError) : '', modelError:a.modelError ? String(a.modelError) : '',
+      expiresAt:traeTime(a.expiresAt),
+      creditExpiry:(Array.isArray(a.creditDetails) ? a.creditDetails : []).filter(d => d && typeof d.remaining === 'number' && d.remaining > 0)
+        .map(d => traeDate(d.expire_time || d.end_time)).filter(d => Number.isFinite(d.getTime()))
+        .sort((a,b) => a.getTime() - b.getTime()).map(d => d.toLocaleString())[0] || ''
+    })),
+    models: (Array.isArray(data.models) ? data.models : []).filter(m => m && typeof m.id === 'string' && m.id.startsWith('trae/')).map(m => ({id:m.id, name:String(m.name || m.id)})),
+    client: data.client && typeof data.client === 'object' ? {installed:!!data.client.installed, version:String(data.client.version || '')} : {}
+  };
+  const d = TRAE_DATA;
+  const summary = traeSummary(d);
+  document.getElementById('traeAccountCount').textContent = summary.accounts;
+  document.getElementById('traeEnabledCount').textContent = traeText('已启用') + ' ' + summary.enabled;
+  document.getElementById('traeCreditTotal').textContent = traeCreditLabel(summary.total);
+  document.getElementById('traeUnknownCount').textContent = summary.unknown;
+  document.getElementById('traeModelCount').textContent = d.models.length;
+  document.getElementById('traeClientVersion').textContent = !d.client.installed
+    ? traeText('未检测到客户端') : 'TRAE CN · ' + (d.client.version || traeText('客户端版本未知'));
+  document.getElementById('traeBaseUrl').textContent = location.origin + '/v1';
+  const statuses = {ready:'正常',active:'正常',enabled:'已启用',disabled:'已禁用',expired:'已过期',error:'错误',unknown:'未查询 / 已导入',imported:'未查询 / 已导入',
+    partial:'部分查询失败',login_expired:'登录已失效',upstream_error:'上游服务错误',rate_limited:'请求受限'};
+  document.getElementById('traeAccounts').innerHTML = d.accounts.length ? d.accounts.map((a, i) => {
+    const state = a.enabled ? (statuses[a.status] || a.status) : '已禁用';
+    return '<article class="trae-account">'
+      + '<div class="trae-account-head"><span class="trae-account-name" data-no-i18n>' + esc(a.label) + '</span><span class="badge ' + (a.enabled ? 'on' : 'off') + '">' + esc(traeText(state)) + '</span></div>'
+      + '<div class="trae-note">TRAE · <span data-no-i18n>' + esc(a.region.toUpperCase()) + '</span></div>'
+      + '<div class="trae-account-credit">' + esc(traeCreditLabel(a.credits)) + '</div>'
+      + (a.expiresAt ? '<div class="trae-note">登录有效期 · <span data-no-i18n>' + esc(a.expiresAt) + '</span></div>' : '')
+      + (a.creditExpiry ? '<div class="trae-note">最近积分期限 · <span data-no-i18n>' + esc(a.creditExpiry) + '</span></div>' : '')
+      + (a.quotaError ? '<div class="trae-account-error">额度查询失败 · <span data-no-i18n>' + esc(a.quotaError) + '</span></div>' : '')
+      + (a.modelError ? '<div class="trae-account-error">模型查询失败 · <span data-no-i18n>' + esc(a.modelError) + '</span></div>' : '')
+      + (a.lastError && a.lastError !== a.quotaError && a.lastError !== a.modelError ? '<div class="trae-account-error" data-no-i18n>' + esc(a.lastError) + '</div>' : '')
+      + (a.status === 'login_expired' ? '<div class="trae-account-error">在 TRAE 内刷新后重新同步</div>' : '')
+      + '<div class="toolbar"><button type="button" class="sec" data-trae-action onclick="traeAccountAction(\'refresh\',' + i + ')">刷新</button>'
+      + '<button type="button" class="sec" data-trae-action onclick="traeAccountAction(\'toggle\',' + i + ')">' + (a.enabled ? '停用' : '启用') + '</button>'
+      + '<button type="button" class="danger" data-trae-action onclick="traeAccountAction(\'remove\',' + i + ')">移除</button></div></article>';
+  }).join('') : '<div class="trae-empty">还没有 TRAE 账号。请先登录本机 TRAE，再点击“扫描本机 TRAE”。</div>';
+  document.getElementById('traeModels').innerHTML = d.models.length ? d.models.map((m, i) =>
+    '<div class="trae-model"><div class="trae-model-info" data-no-i18n><strong>' + esc(m.name) + '</strong><div class="mono">' + esc(m.id) + '</div></div>'
+    + '<button type="button" class="sec" onclick="copyTraeModel(' + i + ')" aria-label="复制模型 ID">复制</button></div>'
+  ).join('') : '<div class="trae-empty">暂无模型。导入账号后点击“刷新额度 / 模型”。</div>';
+  traeSetBusy(TRAE_BUSY);
+  if(window.WB_I18N) window.WB_I18N.apply();
+}
+
+async function loadTraeProvider(){
+  if(TRAE_BUSY) return;
+  traeSetBusy(true);
+  traeSetStatus(traeText('加载 TRAE 状态中…'));
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30000);
+  try{
+    const r = await fetch('/providers/trae', {cache:'no-store', headers:authHeaders(), signal:controller.signal});
+    const data = await r.json().catch(() => ({}));
+    if(r.status === 401 || r.status === 403){ panelSessionLost(); throw new Error('unauthorized'); }
+    if(!r.ok) throw new Error((data.error && data.error.message) || String(r.status));
+    renderTraeProvider(data);
+    traeResultStatus('读取成功');
+  }catch(e){
+    if(!isAuthError(e)){
+      traeSetStatus(traeText('TRAE 状态读取失败') + ': ' + e.message + (TRAE_DATA ? ' · ' + traeText('上次读取失败，下面保留的是此前状态。') : ''), true);
+      if(!TRAE_DATA) document.getElementById('traeAccounts').textContent = traeText('TRAE 状态读取失败');
+    }
+  }finally{clearTimeout(timeout); traeSetBusy(false);}
+}
+
+async function traeProviderAction(action, body){
+  if(TRAE_BUSY || !['import','scan','refresh','toggle','remove'].includes(action)) return;
+  traeSetBusy(true);
+  traeSetStatus(traeText('正在处理 TRAE 操作…'));
+  try{
+    const data = await postJSON('/providers/trae/' + action, body);
+    renderTraeProvider(data);
+    traeResultStatus('TRAE 操作已完成');
+  }catch(e){
+    if(!isAuthError(e)) traeSetStatus(traeText('TRAE 操作失败') + ': ' + e.message, true);
+  }finally{traeSetBusy(false);}
+}
+
+async function importTraeProvider(event){
+  event.preventDefault();
+  if(TRAE_BUSY) return;
+  const input = document.getElementById('traeImportToken');
+  const token = input.value.trim();
+  input.value = '';
+  if(!token){traeSetStatus(traeText('请填写 TRAE 登录凭据'), true); input.focus(); return;}
+  const label = document.getElementById('traeImportLabel').value.trim();
+  await traeProviderAction('import', {label:label, region:'cn', token:token});
+}
+
+function traeAccountAction(action, index){
+  const account = TRAE_DATA && TRAE_DATA.accounts[index];
+  if(!account || TRAE_BUSY) return;
+  if(action === 'remove' && !confirm('移除 TRAE 账号？登录凭据将从可用账号池中移除，服务端保留可恢复备份。')) return;
+  const body = {id:account.id};
+  if(action === 'toggle') body.enabled = !account.enabled;
+  return traeProviderAction(action, body);
+}
+
+function copyTraeModel(index){
+  const model = TRAE_DATA && TRAE_DATA.models[index];
+  if(model) return copyTraeValue(model.id);
+}
+
+async function copyTraeValue(value){
+  try{await writeClipboard(value); toast('已复制到剪贴板', 'ok');}
+  catch(e){toast('复制失败: ' + e.message, 'bad');}
+}
+
 function switchMainTab(tab){
   // 入口被撤掉后（?tab=agents 的书签、上次停留的页签）退回网关页
   if(tab === 'agents' && !AGENTS_AVAILABLE) tab = 'gateway';
@@ -11986,7 +12295,8 @@ function switchMainTab(tab){
     ['analytics', btnAnalytics, pageAnalytics],
     ['logs', btnLogs, pageLogs],
     ['settings', btnSettings, pageSettings],
-    ['agents', btnAgents, pageAgents]
+    ['agents', btnAgents, pageAgents],
+    ['trae', document.getElementById('btnNavTrae'), document.getElementById('pageTrae')]
   ];
   tabs.forEach(([name, btn, page]) => {
     if(!btn || !page) return;
@@ -12001,6 +12311,7 @@ function switchMainTab(tab){
   if(tab === 'analytics'){ loadAnalytics(); loadAnalyticsMatrix(); }
   if(tab === 'settings'){ loadSettings(); loadProxySlots(); }
   if(tab === 'agents'){ loadAgents(); }
+  if(tab === 'trae'){ loadTraeProvider(); }
   if(tab === 'logs'){
     startLogPolling();
     fetchNewLogs(true);

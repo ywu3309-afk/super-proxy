@@ -76,6 +76,7 @@ import wb_modelsdev
 import wb_probes
 import wb_updates
 import wb_update_request
+import wb_trae_http
 IS_WINDOWS = os.name == "nt"
 
 # ---- 一键配置客户端（wb_agents）的可用性判定（issue #246）----
@@ -334,7 +335,7 @@ CORS_PATH_PREFIXES = ("/v1", "/chat", "/completions", "/models", "/responses")
 # Management paths that happen to live under /v1 must not be treated as API:
 # /v1/usage reports account-level spend and is gated by the panel session.
 MANAGEMENT_PATH_PREFIXES = ("/v1/usage", "/usage", "/accounts", "/settings",
-                            "/tasks", "/scheduler", "/panel", "/logs")
+                            "/tasks", "/scheduler", "/panel", "/logs", "/providers")
 def cors_origin_allowed(path):
     """True when the OpenAI-style API path should advertise CORS."""
     path = (path or "").split("?")[0]
@@ -17272,6 +17273,8 @@ class Handler(BaseHTTPRequestHandler):
         Model listings stay reachable with the API key alone so that plain
         OpenAI clients can keep discovering models.
         """
+        if path.startswith("/providers/"):
+            return True
         if path.startswith("/accounts"):
             return True
         if path.startswith("/usage") or path.startswith("/v1/usage"):
@@ -17362,6 +17365,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._get_agents_cli()
         if self._is_panel_route(path) and not self._panel_ok():
             return self._error(401, "panel password required", "invalid_request_error")
+        if path == "/providers/trae" or path.startswith("/providers/trae/"):
+            return wb_trae_http.management(self, path, wb_trae_http.provider_for(ACCOUNTS_DIR))
         if path in ("/", "/dashboard", "/ui"):
             return self._get_dashboard()
         if path == "/panel/status":
@@ -17513,6 +17518,23 @@ class Handler(BaseHTTPRequestHandler):
     def _get_v1_models(self):
         if not self._authorized():
             return
+        only_trae = parse_qs(urlparse(self.path).query).get("provider", [""])[0] == "trae"
+        provider_models = []
+        # A WorkBuddy-account-pinned or realm-bound key must not gain access
+        # to a second provider simply because model names now have a prefix.
+        if pinned_account() is None and not self._key_realm():
+            try:
+                provider_models = wb_trae_http.provider_for(ACCOUNTS_DIR).models()
+            except Exception:
+                # An optional provider's corrupt/unavailable store must not
+                # take down the existing WorkBuddy model listing.
+                if only_trae:
+                    return self._error(503, "TRAE model cache is unavailable", "provider_error")
+            provider_models = [m for m in provider_models
+                               if not self._banned_model_error(m.get("id"))
+                               and not self._key_model_error(m.get("id"))]
+        if only_trae:
+            return self._json(200, {"object": "list", "data": provider_models, "provider": "trae"})
         req_realm = self._request_realm() or CURRENT_REALM
         try:
             entries = fetch_models(realm=req_realm)
@@ -17524,7 +17546,7 @@ class Handler(BaseHTTPRequestHandler):
             wb_modelsdev.refresh_async(ACCOUNTS_DIR, log=log)
         except Exception:
             pass
-        data = [model_entry(mid, meta) for mid, meta in entries]
+        data = [model_entry(mid, meta) for mid, meta in entries] + provider_models
         pinned = pinned_account()
         if pinned is not None:
             # 定址路由宣告的是「这个账号实际能接的模型」：该账号禁用的模型
@@ -20225,6 +20247,8 @@ class Handler(BaseHTTPRequestHandler):
         if not self._apply_pinned_route():
             return
         path = self.path.split("?")[0]
+        if path == "/providers/trae" or path.startswith("/providers/trae/"):
+            return wb_trae_http.management(self, path, wb_trae_http.provider_for(ACCOUNTS_DIR), write=True)
         if path == "/console/toggle":
             # Panel-only management write: 收起/唤出本进程自己的控制台窗口，
             # 与设置、定价那几个写入同一个门。按钮带 `{}` body，
@@ -20410,6 +20434,13 @@ class Handler(BaseHTTPRequestHandler):
                     pass
                 return self._error(400, background_request_message(reason),
                                    "invalid_request_error")
+        if str(payload.get("model") or "").startswith("trae/"):
+            if pinned_account() is not None or self._key_realm():
+                return self._error(403, "this key or pinned route is restricted to WorkBuddy", "invalid_request_error")
+            blocked = self._banned_model_error(payload["model"]) or self._key_model_error(payload["model"])
+            if blocked:
+                return self._error(403, blocked, "invalid_request_error")
+            return wb_trae_http.chat(self, path, payload, wb_trae_http.provider_for(ACCOUNTS_DIR))
         if path in ("/v1/responses", "/responses"):
             return self._handle_responses(payload)
         # Diagnostics: what the client actually asked for, and what we forward.

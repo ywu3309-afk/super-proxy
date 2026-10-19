@@ -42,7 +42,7 @@ npm run desktop
 
 ## 功能总览
 
-Python 网关的控制面板（`dashboard.html`）含 7 大页：
+Python 网关的控制面板（`dashboard.html`）含 8 大页：
 
 1. **网关**：OpenAI 兼容端点、API Key 管理、上游健康。
 2. **账号**：账号池、扫码登录、手动粘贴凭据、额度扫描。
@@ -51,8 +51,18 @@ Python 网关的控制面板（`dashboard.html`）含 7 大页：
 5. **智能体**：代理/工具/模型路由等配置。
 6. **设置**：限额、冷却、代理、安全（面板密码、API Key）。
 7. **日志**：实时日志与历史检索。
+8. **TRAE CN**：独立的本机账号同步、积分池、模型列表与 OpenAI 兼容路由。
 
 打开面板后点「Login new account」即可扫码建号，账号自动落盘到 `data/accounts/`。
+
+### TRAE CN（首版）
+
+- TRAE 使用独立的 `data/trae/` 账号池，不与 WorkBuddy 账号、额度或路由混用。
+- 「扫描本机 TRAE」只读取 TRAE 自己的登录存储，复制当前访问令牌、UID 和有效期到本项目的 Windows DPAPI 保护文件；不接管刷新令牌、设备私钥，也不修改 TRAE 安装目录。
+- 额度接口保留小数并显示为账号积分池参考值；具体模型权益以 TRAE 返回结果为准。
+- 模型以 `trae/<upstream-model-id>` 暴露，文本 Chat Completions 支持普通与 SSE；工具调用、图片、音频暂不接入。
+- 上游请求使用已核实的 TRAE CN 官方主机和 `chat_v3` 路由；若上游忽略 `max_tokens`，本地会在有界输出上限处中止并返回 `output_limit`，不伪造成功、不重放请求。
+- TRAE 的本机登录过期后，请先在 TRAE 内刷新登录，再回到面板执行同步；本项目首版不自行轮换刷新令牌。
 
 ## 账号与数据
 
