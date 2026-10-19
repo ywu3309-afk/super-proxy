@@ -1,0 +1,14 @@
+node_modules
+release
+dist
+out2
+out3
+out4
+build
+test
+electron-user-data
+data
+.git
+*.log
+*.zip
+assets/icon.svg

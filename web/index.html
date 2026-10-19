@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WorkBuddy 多账号调度网关</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="logo">WB</div>
+      <div>
+        <h1>WorkBuddy 多账号调度网关</h1>
+        <p class="sub">账号池 · 自动签到 · 每日任务 · 体验积分 · 本地额度池 · DSH 接入</p>
+      </div>
+    </div>
+    <div class="topbar-right">
+      <span id="mode-badge" class="badge">加载中</span>
+      <button id="btn-theme" class="btn ghost" type="button" title="切换深色 / 浅色">🌙 深色</button>
+      <button id="copy-base" class="btn ghost" type="button" title="复制给 DSH 使用的 Base URL">复制 Base URL</button>
+      <button id="btn-refresh" class="btn" type="button">刷新</button>
+    </div>
+  </header>
+
+  <nav class="tabs" id="tabs">
+    <button class="tab active" data-tab="overview">总览</button>
+    <button class="tab" data-tab="dashboard">数据看板</button>
+    <button class="tab" data-tab="accounts">账号池</button>
+    <button class="tab" data-tab="automation">自动化</button>
+    <button class="tab" data-tab="gateway">网关接入</button>
+    <button class="tab" data-tab="agents">智能体配置</button>
+    <button class="tab" data-tab="logs">运行日志</button>
+  </nav>
+
+  <main id="view" class="view">
+    <div class="loading">正在加载本地网关状态…</div>
+  </main>
+
+  <div id="toast" class="toast"></div>
+  <div id="modal" class="modal hidden">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h3 id="modal-title">编辑账号</h3>
+        <button class="icon-btn" id="modal-close" type="button">×</button>
+      </div>
+      <div id="modal-body"></div>
+      <div class="modal-foot">
+        <button class="btn ghost" id="modal-cancel" type="button">取消</button>
+        <button class="btn" id="modal-ok" type="button">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/app.js" type="module"></script>
+</body>
+</html>

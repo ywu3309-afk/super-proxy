@@ -1,0 +1,7 @@
+{
+  "host": "127.0.0.1",
+  "port": 8787,
+  "timezone": "America/Los_Angeles",
+  "officialUrl": "https://open.workbuddy.cn/",
+  "model": "workbuddy-sim-v1"
+}

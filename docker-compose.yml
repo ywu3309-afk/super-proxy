@@ -1,0 +1,16 @@
+services:
+  workbuddy-gateway:
+    build: .
+    image: workbuddy-gateway:1.0.0
+    container_name: workbuddy-gateway
+    restart: unless-stopped
+    ports:
+      - "8787:8787"
+    volumes:
+      # 账号、凭据密文、日志都在这里，务必持久化
+      - ./data:/data
+    environment:
+      SIM_HOST: 0.0.0.0
+      SIM_PORT: "8787"
+      WBSIM_DATA_DIR: /data
+      TZ: Asia/Shanghai

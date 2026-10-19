@@ -1,0 +1,9 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Two literal, nonfunctional CDP parser test fixtures only"
+condition = "AND"
+paths = ['''(^|[/\\])test[/\\]cdp\.test\.mjs$''']
+regexTarget = "secret"
+regexes = ['''^(tok-main-123456|ref-main-123456)$''']

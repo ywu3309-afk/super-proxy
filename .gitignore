@@ -1,0 +1,58 @@
+node_modules/
+release/
+electron-user-data/
+desktop-startup.log
+
+# 账号、凭据、密钥、使用记录和本机调试数据绝不进入版本库。
+/data/
+/dev-ui-data/
+/analysis/
+/verify-runtime-*/
+/dashboard-preview.html
+/build/re/
+/build/shots/
+
+# 原样保留在本机的上游参考 checkout（含它自己的 .git），不是运行依赖。
+/vendor/
+
+# 本机配置和所有已知的凭据/备份文件形态。
+.env
+.env.*
+!.env.example
+config.json
+.key
+*.key
+*.pem
+*.p12
+*.pfx
+*.info
+secrets*.json
+state*.json
+*.bak
+*.bak-*
+*.backup
+*.backup-*
+*.log
+*.jsonl
+*.dmp
+
+# 下载包、构建产物与更新暂存；资源图标仍正常提交。
+*.zip
+*.tar
+*.tar.gz
+*.7z
+*.exe
+*.dll
+*.asar
+.updates/
+.super-proxy-updates/
+
+# 便携 CPython 运行时（build/portable_runtime.py 从 python-build-standalone 裁剪而来，属构建输入）
+python/
+
+# Python 网关运行期产物
+__pycache__/
+*.pyc
+accounts/
+usage/
+hub/catalog/*.json
