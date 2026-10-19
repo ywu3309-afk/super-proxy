@@ -1,5 +1,13 @@
 # 更新记录
 
+## 未发布（TRAE CN 二次融合）
+
+- 新增独立 TRAE CN 账号池、Windows DPAPI 凭据存储、本机登录同步、积分池与模型发现。
+- 新增 `/providers/trae` 管理 API，以及 `trae/<model-id>` 的 OpenAI 兼容 Chat Completions / SSE 路由。
+- TRAE 与 WorkBuddy 保持独立的账号、模型、并发和错误边界；不复制刷新令牌或设备私钥。
+- 新增 TRAE 页面、积分小数显示、登录/积分期限、partial/quota/model 错误状态及移动布局回归。
+- 上游聊天不自动重放；增加本地输出上限，防止上游忽略 `max_tokens` 时无限消费。
+
 ## 1.1.0
 
 - 建立“超级反代”私人源码仓库及统一桌面版本号。
