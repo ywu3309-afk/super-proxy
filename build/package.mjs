@@ -94,6 +94,7 @@ const out = await packager({
   asar: true,
   icon: 'assets/icon.ico',
   appVersion: metadata.version,
+  win32metadata: { CompanyName: 'SuperProxy', ProductName: '超级反代', FileDescription: '超级反代 WorkBuddy Gateway', OriginalFilename: 'WorkBuddy Gateway.exe' },
   appCopyright: 'WorkBuddy Gateway',
   ...(electronZipDir ? { electronZipDir } : {}),
   download: { cacheRoot: join(ROOT, 'analysis', 'electron-download-cache') },
