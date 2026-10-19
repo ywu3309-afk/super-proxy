@@ -1,6 +1,6 @@
 # 更新记录
 
-## 未发布（TRAE CN 二次融合）
+## 1.2.0（TRAE CN 二次融合）
 
 - 新增独立 TRAE CN 账号池、Windows DPAPI 凭据存储、本机登录同步、积分池与模型发现。
 - 新增 `/providers/trae` 管理 API，以及 `trae/<model-id>` 的 OpenAI 兼容 Chat Completions / SSE 路由。
@@ -17,3 +17,4 @@
 - 更新时保留账号、密钥、设置、用量与窗口偏好；保留旧程序并检查新版本启动。
 - 发布打包使用源码白名单，排除账号、运行日志、调试截图及上游参考 checkout。
 - 保留上游许可及归属说明。
+
