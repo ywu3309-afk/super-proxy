@@ -254,6 +254,30 @@ class NativeClientTests(unittest.TestCase):
         self.assert_code("request_too_large", lambda: self.client.chat(UID, MID, history, max_chars=256))
         self.assertEqual(self.http.requests, [])
 
+    def test_chat_compacts_old_history_without_truncating_latest_turn(self):
+        self.http.add(chat_value())
+        history = [{"role": "system", "content": [{"type": "text", "text": "keep system"}]}]
+        for index in range(20):
+            history.append({"role": "user" if index % 2 == 0 else "assistant",
+                            "content": [{"type": "text", "text": f"old-{index} " + "x" * 5000}]})
+        history.append({"role": "user", "content": [{"type": "text", "text": "latest request"}]})
+        self.client.chat(UID, MID, history, max_chars=256)
+        payload = json.loads(self.http.requests[0][0].data)
+        prompt = payload["prompt"]
+        decoded = json.loads(prompt.split("\n", 1)[1])
+        self.assertLessEqual(native._utf16_length(prompt), native._NATIVE_PROMPT_BUDGET)
+        self.assertEqual(decoded[0], {"role": "system", "content": "Earlier conversation turns were omitted to fit the native TRAE context limit. Use the retained system instructions and latest user request."})
+        self.assertEqual(decoded[-1], {"role": "user", "content": "latest request"})
+        self.assertEqual(decoded[1], {"role": "system", "content": "keep system"})
+        self.assertLess(len(decoded), len(history))
+
+    def test_chat_does_not_truncate_an_oversized_system_or_latest_message(self):
+        history = [{"role": "system", "content": [{"type": "text", "text": "😀" * 30000}]},
+                   {"role": "user", "content": [{"type": "text", "text": "latest"}]}]
+        error = self.assert_code("request_too_large", lambda: self.client.chat(UID, MID, history, max_chars=256))
+        self.assertIn("当前消息本身", error.message)
+        self.assertEqual(self.http.requests, [])
+
 
 class FakeNative:
     def __init__(self):

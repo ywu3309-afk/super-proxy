@@ -16,6 +16,9 @@ import unicodedata
 
 _LIMIT = 1024 * 1024
 _REQUEST_LIMIT = 16 * 1024 * 1024
+_NATIVE_PROMPT_LIMIT = 65536
+_NATIVE_PROMPT_BUDGET = 60000
+_HISTORY_NOTICE = "Earlier conversation turns were omitted to fit the native TRAE context limit. Use the retained system instructions and latest user request."
 _ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$")
 _ERRORS = {
     "BAD_REQUEST": (400, "invalid_request", "TRAE 原生桥接请求格式无效。"),
@@ -54,6 +57,66 @@ class NativeBridgeError(Exception):
 
 def _failure(code):
     return NativeBridgeError(*_ERRORS.get(code, (502, "native_request_failed", "TRAE 原生操作未完成，未重放请求。")))
+
+
+def _utf16_length(value):
+    """Return the JavaScript/TRAE native UTF-16 code-unit length."""
+    return len(value.encode("utf-16-le")) // 2
+
+
+def _native_history_prompt(history):
+    return ("以下 JSON 数组是完整对话记录，role 表示消息角色。遵循 system 消息，基于记录仅回答最后的 user 消息，"
+            "不要复述记录，不调用 TRAE 内置工具。若记录要求输出外部工具协议 JSON，只生成该 JSON 文本，"
+            "工具由外部客户端执行。\n" + json.dumps(history, ensure_ascii=False, separators=(",", ":")))
+
+
+def _compact_native_history(history):
+    """Drop complete old ordinary turns, never slice a message or tool JSON.
+
+    The native TRAE renderer measures prompt size in UTF-16 code units. System
+    instructions and the latest user turn are anchors; older user/assistant
+    turns are removed as whole messages until a 60,000-unit working budget is
+    met. The caller receives a hard request_too_large error when the anchors
+    themselves cannot fit.
+    """
+    prompt = _native_history_prompt(history)
+    if _utf16_length(prompt) <= _NATIVE_PROMPT_BUDGET:
+        return history
+
+    last_user = max((index for index, item in enumerate(history)
+                     if item.get("role") == "user"), default=None)
+    protected = {index for index, item in enumerate(history)
+                 if item.get("role") in ("system", "developer")}
+    if last_user is not None:
+        protected.add(last_user)
+    elif history:
+        protected.add(len(history) - 1)
+
+    # Remove oldest ordinary messages first.  This keeps the retained list in
+    # its original order and never creates a partial JSON/tool definition.
+    selected = list(history)
+    omitted = False
+    for index in range(len(history)):
+        if index in protected:
+            continue
+        selected[index] = None
+        omitted = True
+        compacted = [item for item in selected if item is not None]
+        if _utf16_length(_native_history_prompt(compacted)) <= _NATIVE_PROMPT_BUDGET:
+            selected = compacted
+            break
+
+    if not omitted:
+        raise NativeBridgeError(413, "request_too_large", "工具定义或当前消息本身超过 TRAE 原生上下文限制。")
+
+    compacted = [item for item in selected if item is not None]
+    marker = {"role": "system", "content": _HISTORY_NOTICE}
+    with_marker = [marker, *compacted]
+    if _utf16_length(_native_history_prompt(with_marker)) <= _NATIVE_PROMPT_BUDGET:
+        return with_marker
+    if _utf16_length(_native_history_prompt(compacted)) <= _NATIVE_PROMPT_BUDGET:
+        return compacted
+    raise NativeBridgeError(413, "request_too_large", "工具定义或当前消息本身超过 TRAE 原生上下文限制。")
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -143,11 +206,7 @@ class NativeTraeClient:
         # The observed native API accepts one user text, not OpenAI's structured
         # role array. Preserve the entire transcript explicitly as quoted JSON.
         history = [{"role": m["role"], "content": "".join(b["text"] for b in m["content"])} for m in messages]
-        prompt = ("以下 JSON 数组是完整对话记录，role 表示消息角色。遵循 system 消息，基于记录仅回答最后的 user 消息，"
-                  "不要复述记录，不调用 TRAE 内置工具。若记录要求输出外部工具协议 JSON，只生成该 JSON 文本，"
-                  "工具由外部客户端执行。\n" + json.dumps(history, ensure_ascii=False, separators=(",", ":")))
-        if len(prompt.encode("utf-16-le")) // 2 > 65536:
-            raise NativeBridgeError(413, "request_too_large", "原生文本桥接的完整对话超过 65,536 个 UTF-16 字符。")
+        prompt = _native_history_prompt(_compact_native_history(history))
         body = {"uid": uid, "model": model, "prompt": prompt, "maxChars": max_chars}
         if images:
             body["images"] = images

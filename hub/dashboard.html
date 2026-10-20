@@ -414,11 +414,13 @@ a:hover{text-decoration:underline}
   display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;
 }
 .key-action-btn{
-  display:inline-flex;align-items:center;gap:5px;padding:5px 14px;border-radius:20px;
-  font-size:12px;font-weight:500;cursor:pointer;border:1px solid var(--line);
-  background:var(--panel);color:var(--fg);transition:all .15s ease;box-shadow:var(--shadow-sm);
+  display:inline-flex;align-items:center;justify-content:center;gap:5px;min-width:58px;min-height:30px;
+  padding:5px 14px;border-radius:20px;font-size:12px;font-weight:600;cursor:pointer;
+  border:1px solid var(--line-hover);background:var(--panel2);color:var(--fg);
+  text-align:center;transition:all .15s ease;box-shadow:var(--shadow-sm);
 }
-.key-action-btn:hover{background:var(--panel2);border-color:var(--line-hover)}
+.key-action-btn:hover{background:var(--panel3);border-color:var(--accent);color:var(--fg)}
+.key-action-btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .key-action-btn.danger{
   color:var(--bad);border-color:rgba(181,71,59,.3);background:rgba(181,71,59,.04);
 }
@@ -1129,7 +1131,7 @@ header h1{background:var(--accent-grad);-webkit-background-clip:text;background-
 [data-theme="dark"] .toolbar button:not(.sec){color:#04121f;font-weight:600;text-shadow:none}
 
 /* 深色下霓虹青底的主按钮/选中态改用深字，避免「亮青底+白字」对比度不足。 */
-[data-theme="dark"] button:not(.sec):not(.danger):not(.id-btn),
+[data-theme="dark"] button:not(.sec):not(.danger):not(.id-btn):not(.key-action-btn),
 [data-theme="dark"] .id-btn.active,
 [data-theme="dark"] .realm-pill.active,
 [data-theme="dark"] .range-btn.active{color:#04121f;font-weight:600}
@@ -1389,8 +1391,6 @@ html[data-theme-style="cyber"] .dot{animation:cyberPulse 2.4s ease-in-out infini
   var THEME_KEY = 'wb-theme';
   var THEME_STYLE_KEY = 'wb-theme-style';
   var THEME_STYLES = {
-    claude: {label:'Claude', light:{"--bg":"#efebe0","--panel":"#ffffff","--panel2":"#e9e5d6","--panel3":"#e0dbc9","--line":"#d5cfbc","--line-hover":"#c5bfab","--fg":"#1f1e1b","--dim":"#625f57","--dim-light":"#87847a","--accent":"#a14427","--accent-hover":"#8a3a20","--accent-soft":"rgba(161,68,39,.09)","--accent-selected-bg":"rgba(161,68,39,.14)","--accent2":"#497035","--accent2-soft":"rgba(73,112,53,.12)","--warn":"#a0691c","--warn-soft":"rgba(183,121,31,.12)","--think":"#7d5c8a","--think-soft":"rgba(125,92,138,.10)","--bad":"#b5473b","--bad-soft":"rgba(181,71,59,.09)","--shadow-sm":"0 1px 2px 0 rgba(31,30,27,.05)","--shadow":"0 1px 2px 0 rgba(31,30,27,.05),0 4px 14px rgba(31,30,27,.04)","--shadow-md":"0 2px 6px 0 rgba(31,30,27,.06),0 12px 32px rgba(31,30,27,.09)","--header-bg":"rgba(239,235,224,.92)","--hm0":"#ece6db","--hm1":"#f3d5c1","--hm2":"#e8a98a","--hm3":"#d6846a","--hm4":"#b4533a"}, dark:{"--bg":"#1f1e1b","--panel":"#2d2c25","--panel2":"#38362f","--panel3":"#433f37","--line":"#4f4b42","--line-hover":"#5d584e","--fg":"#edebe3","--dim":"#a5a29a","--dim-light":"#9c9a90","--accent":"#e88a68","--accent-hover":"#f0967a","--accent-soft":"rgba(232,138,104,.14)","--accent-selected-bg":"rgba(232,138,104,.18)","--accent2":"#8fae78","--accent2-soft":"rgba(143,174,120,.15)","--warn":"#d9b25f","--warn-soft":"rgba(217,178,95,.15)","--think":"#bfa3cc","--think-soft":"rgba(191,163,204,.15)","--bad":"#d97b72","--bad-soft":"rgba(217,123,114,.15)","--shadow-sm":"0 1px 2px 0 rgba(0,0,0,.25)","--shadow":"0 1px 2px 0 rgba(0,0,0,.25),0 4px 14px rgba(0,0,0,.25)","--shadow-md":"0 2px 6px 0 rgba(0,0,0,.3),0 12px 32px rgba(0,0,0,.4)","--header-bg":"rgba(31,30,27,.92)","--hm0":"#2b2924","--hm1":"#3d352e","--hm2":"#5a3e30","--hm3":"#8a5a45","--hm4":"#c97250"}},
-    material: {label:'Material', light:{"--bg":"#fefbff","--panel":"#ffffff","--panel2":"#f5eff7","--panel3":"#ece6f0","--line":"#cac4d0","--line-hover":"#b4aab8","--fg":"#1d1b20","--dim":"#5b5b66","--dim-light":"#767680","--accent":"#6750a4","--accent-hover":"#4f378b","--accent-soft":"#eaddff","--accent-selected-bg":"#e8def8","--accent2":"#006a60","--accent2-soft":"#ccfbee","--warn":"#7e5260","--bad":"#b3261e","--bad-soft":"#f9dedc","--think":"#5e5891","--think-soft":"#e5dffa","--shadow-sm":"0 1px 2px 0 rgba(29,27,32,.15)","--shadow":"0 1px 2px 0 rgba(29,27,32,.18),0 1px 3px 1px rgba(29,27,32,.10)","--shadow-md":"0 2px 4px -1px rgba(29,27,32,.12),0 4px 6px 1px rgba(29,27,32,.10)","--header-bg":"rgba(254,251,255,.94)","--hm0":"#e8def8","--hm1":"#d3c2f1","--hm2":"#b8a1ec","--hm3":"#9a82e3","--hm4":"#6750a4"}, dark:{"--bg":"#141218","--panel":"#211f26","--panel2":"#2b2930","--panel3":"#36343b","--line":"#49454f","--line-hover":"#5b5963","--fg":"#e6e1e5","--dim":"#c4c5d0","--dim-light":"#928f9a","--accent":"#d0bcff","--accent-hover":"#b9a4fa","--accent-soft":"rgba(208,188,255,.24)","--accent-selected-bg":"rgba(208,188,255,.30)","--accent2":"#4ecdb4","--accent2-soft":"rgba(78,205,180,.24)","--warn":"#f2b8b4","--bad":"#f2b8b4","--bad-soft":"rgba(242,184,180,.24)","--think":"#cfc4f7","--think-soft":"rgba(207,196,247,.18)","--shadow-sm":"0 1px 2px 0 rgba(0,0,0,.30)","--shadow":"0 1px 2px 0 rgba(0,0,0,.40),0 1px 3px 1px rgba(0,0,0,.30)","--shadow-md":"0 2px 4px -1px rgba(0,0,0,.45),0 4px 6px 1px rgba(0,0,0,.32)","--header-bg":"rgba(20,18,24,.88)","--hm0":"#2b2930","--hm1":"#332e44","--hm2":"#3d3460","--hm3":"#4d4080","--hm4":"#d0bcff"}},
     cyber: {label:'Cyber HUD', light:{
       "--bg":"#e8f1fb","--panel":"#f8fbff","--panel2":"#e1edf8","--panel3":"#d0e2f2",
       "--line":"#b8cfe4","--line-hover":"#8fb4d7","--line2":"#8fb4d7",
@@ -1416,15 +1416,14 @@ html[data-theme-style="cyber"] .dot{animation:cyberPulse 2.4s ease-in-out infini
       "--hm0":"#10223a","--hm1":"#123c5b","--hm2":"#0d6680","--hm3":"#0ca6b5","--hm4":"#22d3ee",
       "--accent-grad":"linear-gradient(135deg,#22d3ee 0%,#3b82f6 55%,#8b5cf6 100%)","--accent-grad-soft":"linear-gradient(135deg,rgba(34,211,238,.18),rgba(139,92,246,.16))","--panel-glow":"0 0 0 1px rgba(34,211,238,.12),0 0 28px rgba(34,211,238,.06)","--serif":"ui-sans-serif,system-ui,-apple-system,\"Segoe UI\",\"PingFang SC\",\"Microsoft YaHei\",sans-serif"
     }},
-    miuix: {label:'MiuiX', light:{"--bg":"#f6f7fa","--panel":"#ffffff","--panel2":"#eef0f4","--panel3":"#e2e6ee","--line":"#dde1e8","--line-hover":"#c9d0db","--fg":"#1f2024","--dim":"#5f6671","--dim-light":"#8c93a0","--accent":"#ff5c00","--accent-hover":"#ff7a33","--accent-soft":"rgba(255,92,0,.10)","--accent-selected-bg":"rgba(255,92,0,.18)","--accent2":"#07c160","--accent2-soft":"rgba(7,193,96,.12)","--warn":"#d48200","--bad":"#e53935","--bad-soft":"rgba(229,57,53,.10)","--think":"#7c4dff","--think-soft":"rgba(124,77,255,.10)","--shadow-sm":"0 1px 2px 0 rgba(31,32,36,.05)","--shadow":"0 2px 6px 0 rgba(31,32,36,.08)","--shadow-md":"0 6px 16px 0 rgba(31,32,36,.10)","--header-bg":"rgba(255,255,255,.85)","--hm0":"#ffece0","--hm1":"#ffd0b8","--hm2":"#ffb085","--hm3":"#ff8c4a","--hm4":"#ff5c00"}, dark:{"--bg":"#0e0f12","--panel":"#191b1f","--panel2":"#22252b","--panel3":"#2a2d34","--line":"#2e3239","--line-hover":"#3a3f48","--fg":"#f0f1f4","--dim":"#9aa0aa","--dim-light":"#7a8090","--accent":"#ff7a33","--accent-hover":"#ff9056","--accent-soft":"rgba(255,122,51,.18)","--accent-selected-bg":"rgba(255,122,51,.26)","--accent2":"#3ed984","--accent2-soft":"rgba(62,217,132,.20)","--warn":"#ffb852","--bad":"#ff6f6f","--bad-soft":"rgba(255,111,111,.16)","--think":"#a78bff","--think-soft":"rgba(167,139,255,.18)","--shadow-sm":"0 1px 2px 0 rgba(0,0,0,.40)","--shadow":"0 2px 6px 0 rgba(0,0,0,.55)","--shadow-md":"0 6px 18px 0 rgba(0,0,0,.60)","--header-bg":"rgba(14,15,18,.78)","--hm0":"#22252b","--hm1":"#332820","--hm2":"#4a2c20","--hm3":"#5c3220","--hm4":"#ff7a33"}}
   };
-  var STYLE_GEOMETRY = {claude:12, material:14, miuix:20, cyber:12};
+  var STYLE_GEOMETRY = {cyber:12};
   Object.keys(THEME_STYLES).forEach(function(id){
     ['light','dark'].forEach(function(mode){
       var v=THEME_STYLES[id][mode];
       var r = STYLE_GEOMETRY[id] || 12;
       v['--radius-card'] = r + 'px';
-      v['--radius-pill'] = (id === 'miuix' ? 16 : r) + 'px';
+      v['--radius-pill'] = r + 'px';
       v['--radius-control'] = Math.max(6, Math.round(r*0.6)) + 'px';
     });
   });
@@ -1455,7 +1454,7 @@ html[data-theme-style="cyber"] .dot{animation:cyberPulse 2.4s ease-in-out infini
   var svgMonitor = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line></svg>';
 
   function applyStyle(style){
-    if(!THEME_STYLES[style]) style = 'claude';
+    if(!THEME_STYLES[style]) style = 'cyber';
     var vars = THEME_STYLES[style][resolvedTheme === 'dark' ? 'dark' : 'light'];
     setStyleAttr(style);
     Object.keys(vars).forEach(function(k){ document.documentElement.style.setProperty(k, vars[k]); });
@@ -1489,7 +1488,7 @@ html[data-theme-style="cyber"] .dot{animation:cyberPulse 2.4s ease-in-out infini
   }
 
   window.applyStyle = function(style){
-    style = THEME_STYLES[style] ? style : 'claude';
+    style = THEME_STYLES[style] ? style : 'cyber';
     try { localStorage.setItem(THEME_STYLE_KEY, style); } catch(e){}
     setStyleAttr(style);
     var mode = document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light';
@@ -3185,9 +3184,6 @@ html[data-theme-style="cyber"] .dot{animation:cyberPulse 2.4s ease-in-out infini
       <div class="theme-dropdown" id="themeDropdown" role="menu" aria-label="选择颜色主题">
         <div class="theme-style-group" role="group" aria-label="主题风格">
           <button type="button" class="theme-option" data-theme-style-option="cyber" onclick="selectStyle('cyber', event)" role="menuitem">Cyber HUD</button>
-          <button type="button" class="theme-option" data-theme-style-option="claude" onclick="selectStyle('claude', event)" role="menuitem">Claude</button>
-          <button type="button" class="theme-option" data-theme-style-option="material" onclick="selectStyle('material', event)" role="menuitem">Material</button>
-          <button type="button" class="theme-option" data-theme-style-option="miuix" onclick="selectStyle('miuix', event)" role="menuitem">MiuiX</button>
         </div>
         <div class="theme-sep" role="separator"></div>
         <button type="button" class="theme-option" id="themeOptLight" onclick="selectTheme('light', event)" role="menuitem">
@@ -11613,10 +11609,10 @@ function renderKeyRows(){
       +     '</div>'
       +   '</div>'
       +   '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">'
-      +     '<button class="key-action-btn" id="copyBtn' + i + '" onclick="copyKeyRow(' + i + ')">复制</button>'
-      +     '<button class="key-action-btn" onclick="openEditKey(' + i + ')">编辑</button>'
-      +     '<button class="key-action-btn" onclick="toggleKeyRow(' + i + ')">' + (row.enabled ? '禁用' : '启用') + '</button>'
-      +     '<button class="key-action-btn danger" onclick="removeKeyRow(' + i + ')">删除</button>'
+      +     '<button type="button" class="key-action-btn" id="copyBtn' + i + '" title="复制 API Key" aria-label="复制 API Key" onclick="copyKeyRow(' + i + ')">复制</button>'
+      +     '<button type="button" class="key-action-btn" title="编辑 API Key" aria-label="编辑 API Key" onclick="openEditKey(' + i + ')">编辑</button>'
+      +     '<button type="button" class="key-action-btn" title="' + (row.enabled ? '禁用 API Key' : '启用 API Key') + '" aria-label="' + (row.enabled ? '禁用 API Key' : '启用 API Key') + '" onclick="toggleKeyRow(' + i + ')">' + (row.enabled ? '禁用' : '启用') + '</button>'
+      +     '<button type="button" class="key-action-btn danger" title="删除 API Key" aria-label="删除 API Key" onclick="removeKeyRow(' + i + ')">删除</button>'
       +   '</div>'
       + '</div>'
       + '</div>';

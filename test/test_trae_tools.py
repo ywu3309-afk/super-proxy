@@ -334,6 +334,27 @@ class ToolBridgeTests(unittest.TestCase):
         self.assert_error(lambda: bridge.prepare(request(messages=[{"role": "user", "content": "😀" * 33000}])), "request_too_large", 413)
         self.assert_error(lambda: bridge.prepare(request(extra="x" * bridge.MAX_REQUEST_BYTES)), "request_too_large", 413)
 
+    def test_long_history_is_compacted_without_changing_tool_definitions(self):
+        messages = ([{"role": "system", "content": "keep system"}] +
+                    [{"role": "user" if index % 2 == 0 else "assistant",
+                      "content": f"old-{index} " + "x" * 5000} for index in range(20)] +
+                    [{"role": "user", "content": "latest request"}])
+        original = copy.deepcopy(messages)
+        plan = bridge.prepare(request(messages=messages))
+        data = json.loads(plan.messages[1]["content"][0]["text"])
+        combined = "".join(message["content"][0]["text"] for message in plan.messages)
+        self.assertLessEqual(bridge._utf16_length(combined), bridge.PROMPT_BUDGET_UTF16)
+        self.assertEqual(data["tools"], request()["tools"])
+        self.assertEqual(data["messages"][0], {"role": "system", "content": bridge.HISTORY_NOTICE})
+        self.assertEqual(data["messages"][-1], {"role": "user", "content": "latest request"})
+        self.assertLess(len(data["messages"]), len(messages))
+        self.assertEqual(messages, original)
+
+    def test_oversized_current_tool_history_message_is_rejected_not_sliced(self):
+        messages = [{"role": "system", "content": "keep system"},
+                    {"role": "user", "content": "😀" * 33000}]
+        self.assert_error(lambda: bridge.prepare(request(messages=messages)), "request_too_large", 413)
+
 
 if __name__ == "__main__":
     unittest.main()
