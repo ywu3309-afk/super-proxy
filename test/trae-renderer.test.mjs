@@ -216,7 +216,8 @@ test('empty project and side-chat session use the verified request contract', as
   assert.equal(chat.data.custom_model.config_name, modelId);
   assert.equal(chat.data.custom_model.use_remote_service, true);
   assert.match(chat.data.message_id, /^[a-f0-9]{24}$/);
-  assert.match(chat.data.message_content[0].text_content, /不使用任何工具/);
+  assert.match(chat.data.message_content[0].text_content, /不调用 TRAE 内置工具/);
+  assert.match(chat.data.message_content[0].text_content, /外部工具协议 JSON/);
   assert.ok(chat.data.message_content[0].text_content.endsWith(input.prompt));
   assert.deepEqual(chat.context, { project_id: 'fixture-project', chat_session_id: 'fixture-session' });
   for (const field of ['terminal_context', 'code_selections', 'parsed_query', 'multi_media', 'workspace_folders']) {

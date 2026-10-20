@@ -29,6 +29,8 @@ WorkBuddy 多账号（各自独立凭据）
 
 **便携版（推荐，Windows）**：解压后双击 `WorkBuddy Gateway.exe`。程序自带 CPython 运行时，自动起本地服务（默认 8787，被占用时自动 +1），不需要装 Python、Node.js 或 Docker。
 
+从 v1.2.2 开始，运行中的 Python 网关意外退出后，桌面会按 1/2/4 秒退避自动恢复，每 5 分钟最多尝试 3 次。恢复固定原端口、确认旧子进程退出，并校验本次启动的健康实例标记；不会把其它进程的 HTTP 200 当成恢复成功。正常退出与桌面升级不会触发自动恢复。
+
 **源码运行（开发）**：
 
 ```powershell
@@ -55,19 +57,38 @@ Python 网关的控制面板（`dashboard.html`）含 8 大页：
 
 打开面板后点「Login new account」即可扫码建号，账号自动落盘到 `data/accounts/`。
 
-### TRAE CN（v1.2.1）
+### TRAE CN（v1.2.2）
 
 - TRAE 使用独立的 `data/trae/` 账号池，不与 WorkBuddy 账号、额度或路由混用。
 - 「扫描本机 TRAE」只读取 TRAE 自己的登录存储，复制当前访问令牌、UID 和有效期到本项目的 Windows DPAPI 保护文件；不接管刷新令牌、设备私钥，也不修改 TRAE 安装目录。
 - 额度接口保留小数并显示为账号积分池参考值；具体模型权益以 TRAE 返回结果为准。
 - 模型以 `trae/<upstream-model-id>` 暴露，目录动态来自当前客户端原生 `model_list_by_function` 的 `chat_v3` 分组；不把固定模型别名冒充最新模型。旧五模型 HTTP 目录只用于兼容回退。
 - **新模型需从桌面程序启动网关，并保持官方 TRAE CN 正在运行、打开一个工作窗口、登录与网关所选账号相同的账号。** 先“扫描本机 TRAE”，再“刷新额度 / 模型”。逐次校验 UID，不会把其它已导入账号的调用计费到当前登录账号。
-- 文本 Chat Completions 支持普通响应与**缓冲 SSE**：完整 `system/user/assistant` 历史序列化为一条带角色的文本交给原生客户端，确认实际模型和正常结束后输出；不是原生逐 token 透传。工具调用、图片、音频暂不接入，原生路由不接受 `temperature/top_p`。
+- Chat Completions 支持普通响应与**缓冲 SSE**：完整对话序列化为带角色的文本交给原生客户端，确认实际模型和正常结束后输出；不是原生逐 token 透传。支持 `developer` 文本角色（映射为 system）及 `max_completion_tokens` 限额别名；图片、音频和 `response_format` 尚不支持，原生路由不接受 `temperature/top_p`，不会静默忽略采样参数。
+- 原生新模型支持 **structured-text 工具协议桥**：接收 `tools`、`tool_choice`、`parallel_tool_calls`、`assistant.tool_calls` 和 `tool/tool_call_id` 历史，将模型的严格 JSON 文本转换为 OpenAI 工具调用及 `finish_reason=tool_calls`。工具只由 DSH 等调用方执行，绝不在 TRAE 中执行；这不是 TRAE 原生 function calling。旧 HTTP 模型不冒充支持工具。
+- 工具桥逐次核对随机响应标记、工具名称、参数 JSON、调用策略和常见 JSON Schema 子集；无效输出显式失败，不重放或把工具调用降成普通文字。`strict=true` 遇到未支持的 schema 关键字（例如 `$ref/$defs`）返回 `unsupported_tool_schema`，不宣称完整 JSON Schema 支持。工具定义、历史和正文共同受原生上下文与本地输出限额约束。
 - 原生客户端的手动审批配置不是硬禁用工具开关；桥接隔离工作区信息，收到非 `finish` 工具事件、超时或输出超限时发送 `stop_chat`。停止失败单独报告，不伪造成功、不重放请求。
 - `max_tokens` 在原生桥接中用于计算本地字符上限（最大 65,536），不是上游精确 token 限额；超限返回 `output_limit`。旧 HTTP 路由仍保留原有有界输出保护。
 - 页面区分原生实时目录、客户端缓存和旧接口，显示目录年龄与上次连接结果；有名称不等于实时权益或已经逐个完成聊天验收。TRAE 关闭时保留上次新目录，不静默降级成旧模型。
 - 桌面桥接仅在回环临时端口监听，随机 bearer 只驻留内存；临时运行时连接用后清理，不修改 TRAE 安装文件或全局权限。当前适配在 TRAE CN 3.4.4 上验证；其它客户端版本以明确报错处理，不猜接口或路由后缀。
 - TRAE 本机登录过期后，请先在 TRAE 内刷新登录，再回到面板同步；本项目不自行轮换刷新令牌。纯 Python 启动没有桌面原生桥接，新模型会明确提示需桌面版。
+
+#### DSH / 其它 OpenAI 客户端
+
+接口使用 `openai-completions`（Chat Completions），Base URL 为 `http://127.0.0.1:8787/v1`，模型 ID 使用目录返回的完整 `trae/` 前缀，例如 `trae/glm-5.3-flashx`。API Key 使用网关中允许访问该模型、且未绑定 WorkBuddy 账号/realm 的 Key，不使用 TRAE Token。
+
+DSH 的自定义 provider 保留原有凭据引用，设置 `api: openai-completions`、上述 `baseURL` 及非空 `models`。推荐兼容参数为：
+
+```yaml
+compat:
+  supportsStore: false
+  supportsDeveloperRole: false
+  supportsReasoningEffort: false
+  supportsStrictMode: false
+  maxTokensField: max_tokens
+```
+
+不要发送 `temperature/top_p`、图片或结构化响应模式；客户端超时应允许缓冲返回（如 180 秒）。工具描述和执行结果按 JSON 保留，由客户端自己的权限/审批和工作目录约束工具执行。调用链为：DSH 定义工具 → TRAE 生成工具协议文本 → 网关返回 `tool_calls` → DSH 执行 → 回传 `tool` 结果 → 模型继续回答。
 
 ## 账号与数据
 

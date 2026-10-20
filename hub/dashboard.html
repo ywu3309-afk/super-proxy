@@ -1645,6 +1645,7 @@ html[data-theme-style="cyber"] .dot{animation:cyberPulse 2.4s ease-in-out infini
     '完成后缓冲返回 · 非逐 token': 'Buffered after completion · not token-by-token',
     '原生文本桥接需保持官方 TRAE 运行，并登录同一账号。': 'The native text bridge requires the official TRAE client running and signed in to the same account.',
     '原生请求完成后缓冲返回（非逐 token）；遇到非 finish 工具事件即停止请求。': 'Native responses are buffered until completion (not token-by-token); a non-finish tool event stops the request.',
+    '支持 OpenAI 工具协议桥接；工具由 DSH 等调用方执行，不在 TRAE 内执行。': 'Supports an OpenAI tool protocol bridge; tools run in clients such as DSH, never inside TRAE.',
     'TRAE 请求超时（90 秒）': 'TRAE request timed out (90 seconds)',
     '复制模型 ID': 'Copy model ID',
     '复制 Base URL': 'Copy base URL',
@@ -3525,6 +3526,7 @@ html[data-theme-style="cyber"] .dot{animation:cyberPulse 2.4s ease-in-out infini
       <p class="trae-note">使用同一 OpenAI 兼容地址，模型 ID 保留 trae/ 前缀。</p>
       <p class="trae-note">原生文本桥接需保持官方 TRAE 运行，并登录同一账号。</p>
       <p class="trae-note">原生请求完成后缓冲返回（非逐 token）；遇到非 finish 工具事件即停止请求。</p>
+      <p class="trae-note">支持 OpenAI 工具协议桥接；工具由 DSH 等调用方执行，不在 TRAE 内执行。</p>
       <div class="trae-endpoint"><code class="mono" id="traeBaseUrl" data-no-i18n></code><button type="button" class="sec" onclick="copyTraeValue(document.getElementById('traeBaseUrl').textContent)">复制 Base URL</button></div>
       <div id="traeModels" class="trae-model-list"><div class="trae-empty">暂无模型。导入账号后点击“刷新额度 / 模型”。</div></div>
     </section>

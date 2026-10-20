@@ -25,6 +25,7 @@ import uuid
 
 from wb_trae_catalog import read_local_model_catalog
 from wb_trae_native import NativeTraeClient, NativeBridgeError
+from wb_trae_tools import prepare as prepare_tools, ToolBridgeError
 
 
 class TraeError(Exception):
@@ -794,20 +795,31 @@ class TraeProvider:
         model = payload.get("model", "")
         if not isinstance(model, str) or not model.startswith("trae/") or not _MODEL.fullmatch(model[5:]):
             raise TraeError(400, "请选择 trae/ 前缀的模型。", "invalid_model")
-        for key in ("tools", "functions", "function_call", "tool_choice", "response_format", "modalities", "audio"):
+        for key in ("functions", "function_call", "response_format", "modalities", "audio"):
             if key in payload:
-                raise TraeError(422, "TRAE 首版仅支持文本对话，不支持工具或多模态参数。", "unsupported_feature")
+                raise TraeError(422, "TRAE 不支持旧版 functions、结构化响应模式或多模态参数。", "unsupported_feature")
+        if "stream" in payload and type(payload["stream"]) is not bool:
+            raise TraeError(400, "stream 必须为布尔值。", "invalid_request")
+        stream_options = payload.get("stream_options")
+        if stream_options is not None and (not isinstance(stream_options, dict)
+                or set(stream_options) - {"include_usage"}
+                or ("include_usage" in stream_options and type(stream_options["include_usage"]) is not bool)):
+            raise TraeError(400, "stream_options 仅支持布尔 include_usage。", "invalid_request")
         if payload.get("n", 1) != 1:
             raise TraeError(422, "TRAE 首版仅支持 n=1。", "unsupported_feature")
+        try:
+            tool_plan = prepare_tools(payload)
+        except ToolBridgeError as error:
+            raise TraeError(error.status, error.message, error.code) from None
         messages = payload.get("messages")
         if not isinstance(messages, list) or not messages or len(messages) > 256:
             raise TraeError(400, "messages 必须为 1 至 256 条文本消息。", "invalid_messages")
         converted = []
-        for message in messages:
-            if not isinstance(message, dict) or message.get("role") not in ("system", "user", "assistant"):
-                raise TraeError(422, "TRAE 首版仅支持 system/user/assistant 文本消息。", "unsupported_feature")
+        for message in (tool_plan.messages if tool_plan else messages):
+            if not isinstance(message, dict) or message.get("role") not in ("system", "developer", "user", "assistant"):
+                raise TraeError(422, "TRAE 仅接受文本消息及有效的工具调用往返。", "unsupported_feature")
             if any(key in message for key in ("tool_calls", "tool_call_id", "function_call")):
-                raise TraeError(422, "TRAE 首版不支持工具调用消息。", "unsupported_feature")
+                raise TraeError(422, "TRAE 工具历史格式无效。", "unsupported_feature")
             content = message.get("content")
             if isinstance(content, list):
                 if not all(isinstance(x, dict) and x.get("type") == "text" and isinstance(x.get("text"), str) for x in content):
@@ -815,14 +827,20 @@ class TraeProvider:
                 content = "".join(x["text"] for x in content)
             if not isinstance(content, str):
                 raise TraeError(400, "消息 content 必须为文本。", "invalid_messages")
-            converted.append({"role": message["role"], "content": [{"type": "text", "text": content}]})
+            role = "system" if message["role"] == "developer" else message["role"]
+            converted.append({"role": role, "content": [{"type": "text", "text": content}]})
         # Verified TRAE CN IDE wire: chat_v3 + model only. A SOLO-style
         # config_name causes 4001 on this endpoint.
         body = {"model": model[5:], "function": "chat_v3", "stream": True,
                 "messages": converted, "max_tokens": 512}
+        numeric_payload = payload.copy()
+        if "max_completion_tokens" in payload:
+            if "max_tokens" in payload and payload["max_tokens"] != payload["max_completion_tokens"]:
+                raise TraeError(400, "max_tokens 与 max_completion_tokens 不得冲突。", "invalid_request")
+            numeric_payload["max_tokens"] = payload["max_completion_tokens"]
         for key in ("temperature", "top_p", "max_tokens"):
-            if key in payload:
-                number = payload[key]
+            if key in numeric_payload:
+                number = numeric_payload[key]
                 if not _finite_number(number):
                     raise TraeError(400, key + " 必须为有限数字。", "invalid_request")
                 if ((key == "temperature" and not 0 <= number <= 2) or
@@ -832,6 +850,9 @@ class TraeProvider:
                 body[key] = number
         if len(_compact(body)) > 2 * 1024 * 1024:
             raise TraeError(413, "TRAE 请求体超过 2 MiB。", "request_too_large")
+        if tool_plan:
+            # Private in-memory plan; never send this object to either upstream.
+            body["_tool_plan"] = tool_plan
         return model, body
 
     def _choose(self, model):
@@ -868,6 +889,8 @@ class TraeProvider:
             if config.get("route") == "native_client":
                 yield from self._native_stream(row, model, body)
                 return
+            if body.get("_tool_plan"):
+                raise TraeError(422, "工具桥接需要 TRAE 原生客户端模型，请刷新目录并选择新模型。", "tools_require_native_client")
             credentials = self._credentials(row)
             response_id = "chatcmpl-trae-" + uuid.uuid4().hex
             created = int(time.time())
@@ -958,8 +981,20 @@ class TraeProvider:
             failure = TraeError(error.status, error.message, error.code)
             self._mark_error(row, failure)
             raise failure from None
+        plan = body.get("_tool_plan")
+        parsed = None
+        if plan:
+            try:
+                parsed = plan.parse(value["response"])
+            except ToolBridgeError as error:
+                failure = TraeError(error.status, error.message, error.code)
+                self._mark_error(row, failure)
+                raise failure from None
         response_id, created = "chatcmpl-trae-" + uuid.uuid4().hex, int(time.time())
         metadata = {"route": "native_client", "streaming": "buffered", "upstream_model": value["upstreamModel"]}
+        if plan:
+            metadata["tool_calling"] = "structured_text"
+            metadata["tool_execution"] = "client"
 
         def chunk(delta, finish=None, usage=None):
             result = {"id": response_id, "created": created, "object": "chat.completion.chunk", "model": model,
@@ -977,14 +1012,21 @@ class TraeProvider:
         if value.get("reasoning_content"):
             yield chunk({"reasoning_content": value["reasoning_content"]})
         # Compatibility SSE is buffered native text, not native token streaming.
-        yield chunk({"content": value["response"]})
-        yield chunk({}, "stop", value.get("usage", {}))
+        if parsed is None:
+            yield chunk({"content": value["response"]})
+        else:
+            if parsed["content"]:
+                yield chunk({"content": parsed["content"]})
+            for index, call in enumerate(parsed["tool_calls"]):
+                yield chunk({"tool_calls": [{"index": index, **call}]})
+        yield chunk({}, parsed["finish_reason"] if parsed else "stop", value.get("usage", {}))
 
     def chat(self, payload):
         chunks = self.stream(payload)
         result = None
         text = []
         reasoning = []
+        tool_calls = {}
         finish = None
         usage = None
         for chunk in chunks:
@@ -996,12 +1038,20 @@ class TraeProvider:
                 usage = chunk["usage"]
             for choice in chunk.get("choices", []):
                 delta = choice.get("delta", {})
-                text.append(delta.get("content", ""))
+                text.append(delta.get("content") or "")
                 reasoning.append(delta.get("reasoning_content", ""))
+                for call in delta.get("tool_calls", []):
+                    target = tool_calls.setdefault(call["index"], {"id": "", "type": "function",
+                        "function": {"name": "", "arguments": ""}})
+                    target["id"] += call.get("id", "")
+                    target["function"]["name"] += call.get("function", {}).get("name", "")
+                    target["function"]["arguments"] += call.get("function", {}).get("arguments", "")
                 finish = choice.get("finish_reason") or finish
         if result is None or finish is None:
             raise TraeError(502, "TRAE 对话未完整结束，未重放请求。", "incomplete_stream")
-        message = {"role": "assistant", "content": "".join(text)}
+        message = {"role": "assistant", "content": "".join(text) or (None if tool_calls else "")}
+        if tool_calls:
+            message["tool_calls"] = [tool_calls[index] for index in sorted(tool_calls)]
         if any(reasoning):
             message["reasoning_content"] = "".join(reasoning)
         result["choices"] = [{"index": 0, "message": message, "finish_reason": finish}]

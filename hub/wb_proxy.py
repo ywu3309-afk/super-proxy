@@ -17500,6 +17500,10 @@ class Handler(BaseHTTPRequestHandler):
             "accounts_ready": POOL.count_ready() if POOL else 0,
             "api_key_required": auth_required(),
         }
+        instance_id = str(os.environ.get("WB_DESKTOP_INSTANCE_ID") or "")
+        if re.fullmatch(r"[a-f0-9]{32}", instance_id):
+            # Non-secret per-process identity; the desktop verifies its own child.
+            info["desktop_instance_id"] = instance_id
         if self._key_ok():
             info.update({
                 "uid": rep.uid if rep else None,

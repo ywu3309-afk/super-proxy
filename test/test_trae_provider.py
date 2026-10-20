@@ -387,13 +387,21 @@ class ProviderTests(unittest.TestCase):
         handler = trae._NoRedirect()
         self.assertCode("redirect_blocked", lambda: handler.redirect_request(None, None, 302, "", {}, "https://evil.test"))
 
-    def test_unsupported_tools_images_rejected_before_network(self):
-        bad = [dict(self.payload, tools=[]), dict(self.payload, tool_choice="none"),
-            dict(self.payload, messages=[{"role": "tool", "content": "x"}]),
-            dict(self.payload, messages=[{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "https://x"}}]}])]
-        for payload in bad:
-            self.assertCode("unsupported_feature", lambda: self.provider.chat(payload))
+    def test_invalid_tools_and_images_rejected_before_network(self):
+        bad = [(dict(self.payload, tools=None), "invalid_tools"),
+            (dict(self.payload, tool_choice="invalid"), "invalid_tools"),
+            (dict(self.payload, messages=[{"role": "tool", "content": "x"}]), "invalid_tool_history"),
+            (dict(self.payload, messages=[{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "https://x"}}]}]), "unsupported_feature")]
+        for payload, code in bad:
+            self.assertCode(code, lambda: self.provider.chat(payload))
         self.assertEqual(self.http.requests, [])
+
+    def test_empty_tool_fields_are_ordinary_text_requests(self):
+        for fields in ({"tools": []}, {"tools": [], "tool_choice": "none", "parallel_tool_calls": False}):
+            model, body = self.provider._payload({**self.payload, **fields})
+            self.assertEqual(model, MODEL)
+            self.assertNotIn("_tool_plan", body)
+            self.assertNotIn("tools", body)
 
     def test_malformed_sse_and_oversized_json_fail_closed(self):
         self.assertCode("invalid_upstream_response", lambda: list(trae.iter_sse(io.BytesIO(b"event: output\ndata: not-json\n\n"))))

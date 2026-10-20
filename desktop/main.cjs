@@ -2,10 +2,12 @@ const { app, BrowserWindow, Menu, Tray, shell, dialog, nativeImage } = require('
 const path = require('node:path');
 const fs = require('node:fs');
 const http = require('node:http');
+const { randomBytes } = require('node:crypto');
 const { spawn, spawnSync } = require('node:child_process');
 const metadata = require('../package.json');
 const { createUpdater } = require('./updater.cjs');
 const { createTraeBridge } = require('./trae-native.cjs');
+const { createGatewaySupervisor } = require('./gateway-supervisor.cjs');
 
 const projectRoot = path.resolve(__dirname, '..');
 const runtimeRoot = process.env.WBSIM_RUNTIME_DIR || (app.isPackaged ? path.dirname(process.execPath) : projectRoot);
@@ -22,6 +24,8 @@ let gateway = null; // { port, host, child }
 let tray = null;
 let quitting = false;
 let traeBridge = null;
+let gatewayPort = null;
+let gatewayChild = null;
 const desktopUpdater = createUpdater({
   app, dialog, repository: metadata.updateRepository, runtimeRoot,
   getGateway: () => gateway,
@@ -105,27 +109,81 @@ function findFreePort(startPort) {
   });
 }
 
-function waitForHealthy(port, timeoutMs = 30000) {
+function waitForHealthy(port, instanceId, signal, timeoutMs = 30000) {
   return new Promise((resolve, reject) => {
     const started = Date.now();
+    let timer;
+    let request;
+    let settled = false;
+    const finish = (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal.removeEventListener('abort', aborted);
+      request?.destroy();
+      error ? reject(error) : resolve();
+    };
+    const aborted = () => finish(signal.reason || new Error('网关启动已取消'));
+    signal.addEventListener('abort', aborted, { once: true });
     const retry = () => {
-      if (Date.now() - started > timeoutMs) return reject(new Error('网关健康检查超时'));
-      setTimeout(attempt, 400);
+      if (settled) return;
+      clearTimeout(timer);
+      if (Date.now() - started > timeoutMs) return finish(new Error('网关健康检查超时'));
+      timer = setTimeout(attempt, 400);
     };
     const attempt = () => {
+      if (signal.aborted) return aborted();
       const req = http.get({ host: '127.0.0.1', port, path: '/health', timeout: 1500 }, (res) => {
-        res.resume();
-        if (res.statusCode === 200) return resolve();
-        retry();
+        let size = 0;
+        const chunks = [];
+        res.on('data', chunk => {
+          size += chunk.length;
+          if (size > 262144) req.destroy(new Error('健康检查响应过大'));
+          else chunks.push(chunk);
+        });
+        res.once('error', retry);
+        res.once('aborted', retry);
+        res.once('end', () => {
+          if (settled) return;
+          try {
+            const health = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+            if (res.statusCode === 200 && health.ok === true && health.desktop_instance_id === instanceId) return finish();
+          } catch { /* A different service or invalid JSON is not our healthy child. */ }
+          retry();
+        });
       });
-      req.on('error', retry);
-      req.on('timeout', () => { req.destroy(); retry(); });
+      request = req;
+      req.once('error', retry);
+      req.once('timeout', () => req.destroy(new Error('健康检查请求超时')));
     };
     attempt();
   });
 }
 
-async function bootGateway() {
+function stopGatewayChild(child) {
+  if (!child.pid || child.exitCode != null || child.signalCode != null) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      child.removeListener('exit', exited);
+      reject(new Error('网关子进程未在停止期限内退出，已停止自动重启'));
+    }, 5000);
+    const exited = () => { clearTimeout(timer); resolve(); };
+    child.once('exit', exited);
+    try {
+      if (!child.kill()) {
+        clearTimeout(timer);
+        child.removeListener('exit', exited);
+        reject(new Error('无法停止网关子进程，已停止自动重启'));
+      }
+    } catch (error) {
+      clearTimeout(timer);
+      child.removeListener('exit', exited);
+      reject(error);
+    }
+  });
+}
+
+async function launchGateway({ signal }) {
   const python = findPython();
   if (!python) {
     throw new Error('未找到 Python 3.9+。请安装 Python 并勾选 "Add to PATH"，或使用自带运行时的便携包。');
@@ -136,9 +194,21 @@ async function bootGateway() {
   fs.mkdirSync(accountsDir, { recursive: true });
   fs.mkdirSync(usageDir, { recursive: true });
 
-  const port = await findFreePort(PREFERRED_PORT);
+  // Only the first launch may choose a free port. Recovery must keep client URLs valid.
+  if (gatewayPort === null) gatewayPort = await findFreePort(PREFERRED_PORT);
+  else if (await findFreePort(gatewayPort) !== gatewayPort) throw new Error(`原网关端口 ${gatewayPort} 已被占用，恢复不会改用其他端口`);
+  const port = gatewayPort;
+  if (signal.aborted) throw signal.reason;
   // This bearer is per-launch and memory-only; never put it in gateway.json/logs.
-  traeBridge = await createTraeBridge();
+  // Reuse the desktop-owned bridge across Python restarts; do not leak a new server.
+  traeBridge ||= await createTraeBridge();
+  if (signal.aborted) {
+    const bridge = traeBridge;
+    traeBridge = null;
+    await bridge.close();
+    throw signal.reason;
+  }
+  const instanceId = randomBytes(16).toString('hex');
   const child = spawn(python, [script, '--port', String(port), '--host', '127.0.0.1'], {
     cwd: hubDir,
     env: {
@@ -146,6 +216,7 @@ async function bootGateway() {
       ACCOUNTS_DIR: accountsDir,
       WB_PROXY_USAGE_DIR: usageDir,
       WB_DESKTOP_VERSION: app.getVersion(),
+      WB_DESKTOP_INSTANCE_ID: instanceId,
       WB_UPDATE_REPO: metadata.updateRepository,
       WB_TRAE_BRIDGE_URL: traeBridge.url,
       WB_TRAE_BRIDGE_TOKEN: traeBridge.token,
@@ -155,20 +226,13 @@ async function bootGateway() {
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true
   });
+  gatewayChild = child;
   child.stdout.on('data', (chunk) => log(`[py] ${String(chunk).trim()}`));
   child.stderr.on('data', (chunk) => log(`[py-err] ${String(chunk).trim()}`));
   child.on('error', (error) => log(`[py-spawn-error] ${error?.message}`));
-  child.on('exit', (code, signal) => {
-    if (!quitting) log(`[py-exit] code=${code} signal=${signal}`);
+  child.on('exit', (code, exitSignal) => {
+    if (!quitting) log(`[py-exit] code=${code} signal=${exitSignal}`);
   });
-
-  await waitForHealthy(port).catch(async (error) => {
-    const exitReason = child.exitCode != null ? `exit=${child.exitCode}` : 'no-response';
-    try { child.kill(); } catch { /* 忽略 */ }
-    throw new Error(`网关启动失败（${exitReason}）：${error.message}`);
-  });
-
-  gateway = { port, host: '127.0.0.1', child };
   const info = {
     port,
     host: '127.0.0.1',
@@ -180,14 +244,58 @@ async function bootGateway() {
     startedAt: new Date().toISOString(),
     version: app.getVersion()
   };
-  try {
-    fs.writeFileSync(portFile, JSON.stringify(info, null, 2), 'utf8');
-  } catch (error) {
-    log(`[port-file-error] ${error?.message || error}`);
-  }
-  log(`[gateway-started] ${info.dashboard} (python=${python})`);
-  return info;
+  return {
+    child, info,
+    ready: (abortSignal) => waitForHealthy(port, instanceId, abortSignal),
+    async dispose() {
+      await stopGatewayChild(child);
+      if (gatewayChild === child) gatewayChild = null;
+    }
+  };
 }
+
+function gatewayStatusPage(state, details) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const failed = state === 'failed';
+  const title = failed ? '网关自动恢复已停止' : '网关连接中断，正在恢复';
+  const message = failed
+    ? '为避免连续故障或重复进程，自动恢复已停止（每 5 分钟最多重启 3 次）。请查看 desktop-startup.log，排除原因后完整退出并重新启动软件。'
+    : `正在使用原端口恢复本地服务${details.attempt ? `（第 ${details.attempt}/3 次，${details.delayMs / 1000} 秒后重试）` : '…'}。账号与设置不会更改。`;
+  const html = `<!doctype html><meta charset="utf-8"><title>超级反代</title><body style="margin:0;background:#0f1115;color:#e6edf3;font:16px system-ui;display:grid;place-content:center;height:100vh"><main style="max-width:680px;padding:40px"><h1 style="color:#71b7ff">${title}</h1><p>${message}</p><p>日志位置：${path.join(runtimeRoot, 'desktop-startup.log').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}</p></main>`;
+  mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`).catch(error => log(`[gateway-status-ui-error] ${error?.message || error}`));
+}
+
+const gatewaySupervisor = createGatewaySupervisor({
+  launch: launchGateway,
+  onState(state, details) {
+    log(`[gateway-supervisor] state=${state}${details.attempt ? ` attempt=${details.attempt}/3 delayMs=${details.delayMs}` : ''}${details.error ? ` error=${details.error.message}` : ''}`);
+    if (state === 'running') {
+      const { info, resource, recovered } = details;
+      gateway = { port: info.port, host: info.host, child: resource.child };
+      try { fs.writeFileSync(portFile, JSON.stringify(info, null, 2), 'utf8'); }
+      catch (error) { log(`[port-file-error] ${error?.message || error}`); }
+      log(`[gateway-started] ${info.dashboard} (python=${info.python})`);
+      if (recovered && mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.loadURL(info.dashboard).catch(error => log(`[gateway-reload-error] ${error?.message || error}`));
+      }
+      if (tray) tray.setToolTip(`超级反代 v${app.getVersion()} — 网关正常`);
+    } else if (['offline', 'recovering', 'restarting', 'failed', 'stopped'].includes(state)) {
+      gateway = null;
+      try { fs.rmSync(portFile, { force: true }); }
+      catch (error) { log(`[port-file-error] ${error?.message || error}`); }
+      if (!quitting && state !== 'stopped') {
+        gatewayStatusPage(state, details);
+        if (tray) tray.setToolTip(`超级反代 v${app.getVersion()} — ${state === 'failed' ? '网关已停止' : '网关恢复中'}`);
+      }
+    }
+  },
+  onFailure(error) {
+    log(`[gateway-recovery-failed] ${error?.stack || error}`);
+    if (!quitting) dialog.showErrorBox('网关恢复失败', `本地网关自动恢复已停止：${error.message}\n\n请完整退出并重新打开软件。日志：${path.join(runtimeRoot, 'desktop-startup.log')}`);
+  }
+});
+
+function bootGateway() { return gatewaySupervisor.start(); }
 
 function createTray(port) {
   const candidates = [
@@ -309,11 +417,12 @@ app.on('activate', () => {
 
 app.on('before-quit', async () => {
   quitting = true;
-  if (traeBridge) { traeBridge.close().catch(() => {}); traeBridge = null; }
+  gatewaySupervisor.stop().catch(error => log(`[gateway-stop-error] ${error?.message || error}`));
+  if (traeBridge) { traeBridge.close().catch(error => log(`[trae-bridge-close-error] ${error?.message || error}`)); traeBridge = null; }
   try {
     fs.rmSync(portFile, { force: true });
   } catch { /* 忽略 */ }
-  if (gateway?.child) {
-    try { gateway.child.kill(); } catch { /* 忽略 */ }
+  if (gatewayChild) {
+    try { gatewayChild.kill(); } catch (error) { log(`[gateway-kill-error] ${error?.message || error}`); }
   }
 });

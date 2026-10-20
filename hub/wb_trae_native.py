@@ -138,7 +138,8 @@ class NativeTraeClient:
         # role array. Preserve the entire transcript explicitly as quoted JSON.
         history = [{"role": m["role"], "content": "".join(b["text"] for b in m["content"])} for m in messages]
         prompt = ("以下 JSON 数组是完整对话记录，role 表示消息角色。遵循 system 消息，基于记录仅回答最后的 user 消息，"
-                  "不要复述记录，不使用工具。\n" + json.dumps(history, ensure_ascii=False, separators=(",", ":")))
+                  "不要复述记录，不调用 TRAE 内置工具。若记录要求输出外部工具协议 JSON，只生成该 JSON 文本，"
+                  "工具由外部客户端执行。\n" + json.dumps(history, ensure_ascii=False, separators=(",", ":")))
         if len(prompt.encode("utf-16-le")) // 2 > 65536:
             raise NativeBridgeError(413, "request_too_large", "原生文本桥接的完整对话超过 65,536 个 UTF-16 字符。")
         value = self._call("chat", {"uid": uid, "model": model, "prompt": prompt, "maxChars": max_chars}, 120000)

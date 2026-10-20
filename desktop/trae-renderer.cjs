@@ -162,7 +162,7 @@ async function performTraeOperation(input, moduleUrl, deps) {
       custom_model: { provider: '', config_name: model.upstreamId, display_model_name: model.name,
         multimodal: false, ak: '', sk: '', base_url: '', auth_type: 0, use_remote_service: true,
         is_preset: true, config_source: 1 }, terminal_context: [],
-      message_content: [{ type: 'text', text_content: '仅返回纯文本，不使用任何工具，不读取或修改文件，不执行命令。\n\n' + input.prompt }],
+      message_content: [{ type: 'text', text_content: '仅返回纯文本，不调用 TRAE 内置工具，不读取或修改文件，不执行命令。若输入要求生成外部工具协议 JSON，仅将它作为文本输出，由外部客户端执行。\n\n' + input.prompt }],
       code_selections: [], scene_location: 2, parsed_query: [], multi_media: [], workspace_folders: [],
       is_workspace_folder_changed: false, active_text_editor: null, asr_times: 0 };
     chatStarted = true;
