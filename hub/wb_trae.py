@@ -351,7 +351,8 @@ class TraeProvider:
     def _metric_int(value):
         return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
 
-    def _record_request(self, row, model, body, started, *, usage=None, outcome="completed", error=None):
+    def _record_request(self, row, model, body, started, *, usage=None,
+                        usage_source=None, outcome="completed", error=None):
         """Append one redacted TRAE request row for the local dashboard."""
         try:
             usage = usage if isinstance(usage, dict) else {}
@@ -378,6 +379,7 @@ class TraeProvider:
                 "completionTokens": completion,
                 "reasoningTokens": reasoning,
                 "totalTokens": total,
+                "usageSource": str(usage_source or ("upstream" if usage else "missing")),
             }
             self.root.mkdir(parents=True, exist_ok=True)
             with self.metrics_path.open("a", encoding="utf-8") as fh:
@@ -409,6 +411,7 @@ class TraeProvider:
             except (OSError, UnicodeError):
                 rows = []
             total = success = errors = total_tokens = input_tokens = output_tokens = latency = 0
+            estimated_requests = estimated_tokens = 0
             by_model = {}
             by_account = {}
             for item in rows:
@@ -420,6 +423,9 @@ class TraeProvider:
                 prompt = self._metric_int(item.get("promptTokens"))
                 completion = self._metric_int(item.get("completionTokens"))
                 total_tokens += tokens
+                if item.get("usageSource") == "estimated":
+                    estimated_requests += 1
+                    estimated_tokens += tokens
                 input_tokens += prompt
                 output_tokens += completion
                 latency += self._metric_int(item.get("latencyMs"))
@@ -450,6 +456,8 @@ class TraeProvider:
                     "totalTokens": total_tokens,
                     "inputTokens": input_tokens,
                     "outputTokens": output_tokens,
+                    "estimatedRequests": estimated_requests,
+                    "estimatedTokens": estimated_tokens,
                     "avgLatencyMs": round(latency / success) if success else None,
                     "lastRequestAt": rows[-1].get("at") if rows else None,
                 },
@@ -457,7 +465,7 @@ class TraeProvider:
                 "byAccount": sorted(by_account.values(), key=lambda item: item["tokens"], reverse=True),
                 "recent": [{key: item.get(key) for key in (
                     "at", "model", "account", "route", "mode", "status", "errorCode",
-                    "latencyMs", "totalTokens")} for item in rows[-30:][::-1]],
+                    "latencyMs", "totalTokens", "usageSource")} for item in rows[-30:][::-1]],
             }
             self._metrics_cache = result
             self._metrics_cache_at = now
@@ -1055,19 +1063,27 @@ class TraeProvider:
     def _tracked_stream(self, row, model, body):
         started = time.monotonic()
         usage = None
+        usage_source = None
         try:
             for chunk in self._stream(row, model, body):
                 if isinstance(chunk, dict) and isinstance(chunk.get("usage"), dict):
                     usage = chunk["usage"]
+                if isinstance(chunk, dict) and isinstance(chunk.get("provider_metadata"), dict):
+                    source = chunk["provider_metadata"].get("usage_source")
+                    if source in ("upstream", "estimated", "missing"):
+                        usage_source = source
                 yield chunk
         except TraeError as error:
-            self._record_request(row, model, body, started, usage=usage, outcome="error", error=error.code)
+            self._record_request(row, model, body, started, usage=usage,
+                                 usage_source=usage_source, outcome="error", error=error.code)
             raise
         except Exception:
-            self._record_request(row, model, body, started, usage=usage, outcome="error", error="internal_error")
+            self._record_request(row, model, body, started, usage=usage,
+                                 usage_source=usage_source, outcome="error", error="internal_error")
             raise
         else:
-            self._record_request(row, model, body, started, usage=usage, outcome="completed")
+            self._record_request(row, model, body, started, usage=usage,
+                                 usage_source=usage_source, outcome="completed")
 
     def _stream(self, row, model, body):
         with self._account_lock(row["id"]):
@@ -1191,6 +1207,9 @@ class TraeProvider:
                 raise failure from None
         response_id, created = "chatcmpl-trae-" + uuid.uuid4().hex, int(time.time())
         metadata = {"route": "native_client", "streaming": "buffered", "upstream_model": value["upstreamModel"]}
+        if value.get("usageEstimated") is True:
+            metadata["usage_estimated"] = True
+            metadata["usage_source"] = "estimated"
         if plan:
             metadata["tool_calling"] = "structured_text"
             metadata["tool_execution"] = "client"

@@ -242,12 +242,17 @@ class NativeClientTests(unittest.TestCase):
         self.assertEqual(self.client.chat(UID, MID, messages(), max_chars=4)["response"], "ab")
         self.assertEqual(len(self.http.requests), 2)
 
-    def test_chat_drops_noninteger_negative_or_unsafe_usage_fields(self):
+    def test_chat_estimates_when_usage_is_missing_or_invalid(self):
         for usage in ({"prompt_tokens": True, "completion_tokens": -1, "total_tokens": "4"},
                       {"prompt_tokens": 2**53, "completion_tokens": 1.5, "total_tokens": None}, [], None):
             with self.subTest(usage=usage):
                 self.http.add(chat_value(usage=usage))
-                self.assertEqual(self.client.chat(UID, MID, messages(), max_chars=256)["usage"], {})
+                result = self.client.chat(UID, MID, messages(), max_chars=256)
+                self.assertTrue(result["usageEstimated"])
+                self.assertGreater(result["usage"]["prompt_tokens"], 0)
+                self.assertGreater(result["usage"]["completion_tokens"], 0)
+                self.assertEqual(result["usage"]["total_tokens"],
+                                 result["usage"]["prompt_tokens"] + result["usage"]["completion_tokens"])
 
     def test_chat_utf16_history_limit_fails_before_bridge_call(self):
         history = [{"role": "user", "content": [{"type": "text", "text": "😀" * 32768}]}]
@@ -454,6 +459,21 @@ class NativeProviderTests(unittest.TestCase):
         self.assertEqual(completion["choices"][0]["finish_reason"], "stop")
         self.assertEqual(completion["usage"]["total_tokens"], 10)
         self.assertNotIn(UID, json.dumps(completion))
+
+    def test_missing_native_usage_is_estimated_and_marked_without_faking_upstream_billing(self):
+        self.ready()
+        self.native.result = chat_value(
+            usage={"prompt_tokens": 11, "completion_tokens": 5, "total_tokens": 16},
+            usageEstimated=True,
+        )
+        completion = self.provider.chat(self.payload)
+        self.assertGreater(completion["usage"]["total_tokens"], 0)
+        self.assertTrue(completion["provider_metadata"]["usage_estimated"])
+        self.assertEqual(completion["provider_metadata"]["usage_source"], "estimated")
+        analytics = self.provider.analytics()
+        self.assertEqual(analytics["summary"]["estimatedRequests"], 1)
+        self.assertGreater(analytics["summary"]["estimatedTokens"], 0)
+        self.assertEqual(analytics["recent"][0]["usageSource"], "estimated")
 
     def test_native_temperature_and_top_p_rejected_before_chat_dispatch(self):
         self.ready()

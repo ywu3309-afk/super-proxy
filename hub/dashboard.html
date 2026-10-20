@@ -3551,7 +3551,7 @@ html[data-theme-style="cyber"] .dot{animation:cyberPulse 2.4s ease-in-out infini
        </section>
      </div>
      <section class="trae-panel trae-usage" aria-labelledby="traeUsageTitle">
-       <div class="trae-header" style="margin-bottom:4px"><div><h2 id="traeUsageTitle">TRAE 调用看板</h2><p class="trae-note">只记录本机网关的脱敏统计，不保存提示词、图片、Token 或登录凭据。</p></div><button type="button" class="sec" data-trae-action onclick="loadTraeProvider()">刷新看板</button></div>
+       <div class="trae-header" style="margin-bottom:4px"><div><h2 id="traeUsageTitle">TRAE 调用看板</h2><p class="trae-note">只记录本机网关的脱敏统计，不保存提示词、图片、Token 或登录凭据；TRAE 未返回官方用量时会明确标记“估算”。</p></div><button type="button" class="sec" data-trae-action onclick="loadTraeProvider()">刷新看板</button></div>
        <div class="cards trae-usage-stats">
          <div class="card"><div class="k">请求数</div><div class="v" id="traeMetricRequests">—</div><div class="s" id="traeMetricSuccess">成功 —</div></div>
          <div class="card"><div class="k">成功率</div><div class="v" id="traeMetricRate">—</div><div class="s">失败请求单独统计</div></div>
@@ -12470,7 +12470,9 @@ function renderTraeMetrics(metrics){
   set('traeMetricSuccess', '成功 ' + traeMetricLabel(success) + ' · 失败 ' + traeMetricLabel(value.errors));
   set('traeMetricRate', rate);
   set('traeMetricTokens', traeMetricLabel(value.totalTokens));
-  set('traeMetricSplit', '输入 / 输出 ' + traeMetricLabel(value.inputTokens) + ' / ' + traeMetricLabel(value.outputTokens));
+  const estimated = traeNumber(value.estimatedRequests);
+  const estimateNote = estimated ? ' · 估算 ' + traeMetricLabel(estimated) + ' 次' : '';
+  set('traeMetricSplit', '输入 / 输出 ' + traeMetricLabel(value.inputTokens) + ' / ' + traeMetricLabel(value.outputTokens) + estimateNote);
   set('traeMetricLatency', typeof value.avgLatencyMs === 'number' ? value.avgLatencyMs.toLocaleString() + ' ms' : '—');
   const renderRows = (items, key, empty) => items.length ? items.slice(0, 8).map(item => {
     const name = String(item[key] || '未知');
@@ -12485,7 +12487,8 @@ function renderTraeMetrics(metrics){
   if(recentBox) recentBox.innerHTML = recent.length ? recent.map(item => {
     const time = traeTime(item.at) || '—';
     const status = item.status === 'completed' ? '成功' : ('失败 ' + (item.errorCode || ''));
-    return '<div class="trae-recent-row"><span>' + esc(time) + '</span><code data-no-i18n>' + esc(item.model || 'unknown') + '</code><span>' + esc(status) + '</span></div>';
+    const usage = item.usageSource === 'estimated' ? ' · 估算' : '';
+    return '<div class="trae-recent-row"><span>' + esc(time) + '</span><code data-no-i18n>' + esc(item.model || 'unknown') + '</code><span>' + esc(status + usage) + '</span></div>';
   }).join('') : '<div class="trae-empty">暂无 TRAE 调用记录</div>';
 }
 

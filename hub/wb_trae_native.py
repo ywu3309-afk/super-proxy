@@ -20,6 +20,7 @@ _NATIVE_PROMPT_LIMIT = 65536
 _NATIVE_PROMPT_BUDGET = 60000
 _HISTORY_NOTICE = "Earlier conversation turns were omitted to fit the native TRAE context limit. Use the retained system instructions and latest user request."
 _ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$")
+_CJK_RE = re.compile(r"[\u4e00-\u9fff\u3400-\u4dbf]")
 _ERRORS = {
     "BAD_REQUEST": (400, "invalid_request", "TRAE 原生桥接请求格式无效。"),
     "BUSY": (429, "native_busy", "TRAE 本机桥接正在处理其他请求，请稍后再试。"),
@@ -62,6 +63,24 @@ def _failure(code):
 def _utf16_length(value):
     """Return the JavaScript/TRAE native UTF-16 code-unit length."""
     return len(value.encode("utf-16-le")) // 2
+
+
+def _estimate_tokens(value):
+    """Estimate token count when the native TRAE client omits usage.
+
+    TRAE's native renderer does not always emit a ``token_usage`` event.  The
+    OpenAI-compatible surface still needs a useful non-zero usage value for
+    clients such as DSH, so use the same conservative text heuristic as the
+    gateway's other provider paths.  The caller labels this value as estimated;
+    it is never presented as an upstream billing figure.
+    """
+    if not value:
+        return 0
+    if not isinstance(value, str):
+        value = str(value)
+    cjk = len(value) - len(_CJK_RE.sub("", value))
+    other = len(value) - cjk
+    return cjk + max(1, int(other / 3.6))
 
 
 def _native_history_prompt(history):
@@ -219,7 +238,39 @@ class NativeTraeClient:
             raise _failure("UPSTREAM_MODEL_UNCONFIRMED")
         if len(value["response"]) + len(value.get("reasoning_content", "")) > max_chars:
             raise _failure("OUTPUT_LIMIT")
-        usage = value.get("usage", {})
-        value["usage"] = {key: usage[key] for key in ("prompt_tokens", "completion_tokens", "total_tokens")
-                          if isinstance(usage, dict) and type(usage.get(key)) is int and 0 <= usage[key] <= 2**53 - 1}
-        return {key: value[key] for key in ("response", "reasoning_content", "usage", "finish_reason", "upstreamModel", "model") if key in value}
+        raw_usage = value.get("usage")
+        usage = {
+            key: raw_usage[key]
+            for key in ("prompt_tokens", "completion_tokens", "total_tokens")
+            if (isinstance(raw_usage, dict)
+                and type(raw_usage.get(key)) is int
+                and 0 <= raw_usage[key] <= 2**53 - 1)
+        }
+        if ("total_tokens" not in usage
+                and "prompt_tokens" in usage
+                and "completion_tokens" in usage
+                and usage["prompt_tokens"] + usage["completion_tokens"] <= 2**53 - 1):
+            usage["total_tokens"] = usage["prompt_tokens"] + usage["completion_tokens"]
+
+        usage_estimated = usage.get("total_tokens", 0) <= 0
+        if usage_estimated:
+            prompt_tokens = max(1, _estimate_tokens(prompt))
+            completion_tokens = (_estimate_tokens(value["response"])
+                                 + _estimate_tokens(value.get("reasoning_content", "")))
+            usage = {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens,
+            }
+
+        result = {
+            "response": value["response"],
+            "reasoning_content": value.get("reasoning_content", ""),
+            "usage": usage,
+            "finish_reason": value["finish_reason"],
+            "upstreamModel": value["upstreamModel"],
+            "model": value["model"],
+        }
+        if usage_estimated:
+            result["usageEstimated"] = True
+        return result
