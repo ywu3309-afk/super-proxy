@@ -15,6 +15,7 @@ import unicodedata
 
 
 _LIMIT = 1024 * 1024
+_REQUEST_LIMIT = 16 * 1024 * 1024
 _ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$")
 _ERRORS = {
     "BAD_REQUEST": (400, "invalid_request", "TRAE 原生桥接请求格式无效。"),
@@ -35,6 +36,8 @@ _ERRORS = {
     "UPSTREAM_MODEL_MISMATCH": (502, "upstream_model_mismatch", "TRAE 实际模型配置与所选模型不一致，已停止请求。"),
     "UPSTREAM_MODEL_UNCONFIRMED": (502, "upstream_model_unconfirmed", "TRAE 未确认实际模型配置，未作为成功回答返回。"),
     "MODEL_UNAVAILABLE": (503, "model_unavailable", "所选模型不在当前 TRAE 原生目录中，请刷新模型。"),
+    "IMAGE_NOT_SUPPORTED": (422, "image_not_supported", "当前 TRAE 模型未声明图片能力。"),
+    "IMAGE_UPLOAD_FAILED": (502, "image_upload_failed", "图片上传失败，未开始模型生成。"),
     "NATIVE_CLIENT_UNAVAILABLE": (503, "native_client_unavailable", "当前 TRAE 原生客户端不可用，请重新打开工作窗口。"),
     "CATALOG_UNAVAILABLE": (503, "catalog_unavailable", "TRAE 未返回可用的原生模型目录。"),
     "INCOMPLETE_RESPONSE": (502, "incomplete_stream", "TRAE 原生响应未完整结束，未重放请求。"),
@@ -84,7 +87,7 @@ class NativeTraeClient:
         if not isinstance(payload.get("uid"), str) or not _ID.fullmatch(payload["uid"]):
             raise NativeBridgeError(409, "native_uid_required", "请使用“扫描本机 TRAE”同步带有用户标识的账号。")
         body = json.dumps({**payload, "timeoutMs": timeout_ms}, ensure_ascii=False).encode("utf-8")
-        if len(body) > _LIMIT:
+        if len(body) > _REQUEST_LIMIT:
             raise NativeBridgeError(413, "request_too_large", "TRAE 原生桥接请求过大。")
         url = self._url + "/" + operation
         request = urllib.request.Request(url, data=body, method="POST", headers={
@@ -129,11 +132,14 @@ class NativeTraeClient:
             if (not isinstance(name, str) or not 0 < len(name) <= 160 or name != name.strip()
                     or any(unicodedata.category(c).startswith("C") for c in name) or mid in seen):
                 raise _failure("CATALOG_UNAVAILABLE")
-            clean.append({"upstreamId": mid, "name": name, "route": "native_client", "source": "native_client"})
+            entry = {"upstreamId": mid, "name": name, "route": "native_client", "source": "native_client"}
+            if "supports_vision" in model:
+                entry["supports_vision"] = mid == "deepseek-v4.1-flash" and model["supports_vision"] is True
+            clean.append(entry)
             seen.add(mid)
         return {"models": clean, "source": "native_client", "fetchedAt": value.get("fetchedAt")}
 
-    def chat(self, uid, model, messages, *, max_chars):
+    def chat(self, uid, model, messages, *, max_chars, images=None):
         # The observed native API accepts one user text, not OpenAI's structured
         # role array. Preserve the entire transcript explicitly as quoted JSON.
         history = [{"role": m["role"], "content": "".join(b["text"] for b in m["content"])} for m in messages]
@@ -142,7 +148,10 @@ class NativeTraeClient:
                   "工具由外部客户端执行。\n" + json.dumps(history, ensure_ascii=False, separators=(",", ":")))
         if len(prompt.encode("utf-16-le")) // 2 > 65536:
             raise NativeBridgeError(413, "request_too_large", "原生文本桥接的完整对话超过 65,536 个 UTF-16 字符。")
-        value = self._call("chat", {"uid": uid, "model": model, "prompt": prompt, "maxChars": max_chars}, 120000)
+        body = {"uid": uid, "model": model, "prompt": prompt, "maxChars": max_chars}
+        if images:
+            body["images"] = images
+        value = self._call("chat", body, 120000)
         if (value.get("model") != model or value.get("finish_reason") != "stop"
                 or not isinstance(value.get("upstreamModel"), str)
                 or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}", value["upstreamModel"])

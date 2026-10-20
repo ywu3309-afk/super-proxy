@@ -5,12 +5,13 @@ parser delimit the model's structured answer. No tool or command executes here.
 Tool calls always require complete strict JSON. Narrow final-text compatibility
 is explicitly marked and never retries, repairs, or executes a tool call.
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import copy
 import json
 import math
 import re
 import secrets
+from wb_trae_images import split_messages, ImageInputError, MAX_REQUEST_BYTES as MAX_IMAGE_REQUEST_BYTES
 
 
 MAX_REQUEST_BYTES = 2 * 1024 * 1024
@@ -168,13 +169,15 @@ def _bounded_tree(value):
             pending.extend((child, depth + 1) for child in item)
 
 
-def _text(content, nullable=False):
+def _text(content, nullable=False, image_refs=False):
     if nullable and content is None:
         return
     if isinstance(content, str):
         return
     if isinstance(content, list) and all(
-        isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str)
+        isinstance(part, dict) and (part.get("type") == "text" and isinstance(part.get("text"), str)
+            or image_refs and set(part) == {"type", "image_id"} and part.get("type") == "image_ref"
+            and isinstance(part.get("image_id"), str))
         for part in content
     ):
         return
@@ -325,6 +328,7 @@ class ToolPlan:
     parallel: bool
     max_output_chars: int = MAX_OUTPUT_CHARS
     protocol: str = "json_envelope"
+    images: list = field(default_factory=list)
 
     @property
     def tool_names(self):
@@ -394,11 +398,21 @@ def prepare(payload):
     messages = payload.get("messages", [])
     if not isinstance(messages, list):
         _error("messages 必须为数组。", "invalid_messages", 400)
+    try:
+        if len(_json(payload).encode("utf-8")) > MAX_IMAGE_REQUEST_BYTES:
+            _error("请求超过 16 MiB。", "request_too_large", 413)
+        _bounded_tree(payload)
+        messages, images = split_messages(messages, payload.get("model"))
+    except ImageInputError as error:
+        _error(error.message, error.code, error.status)
+    except (ValueError, TypeError, RecursionError, UnicodeError):
+        _error("请求必须为有限且有效的 JSON。", "invalid_request", 400)
+    normalized = {**payload, "messages": messages}
     has_history = any(isinstance(m, dict) and (m.get("role") == "tool" or "tool_calls" in m or "tool_call_id" in m) for m in messages)
     if not framed and not tools and not has_history and not any(k in payload for k in ("tool_choice", "parallel_tool_calls")):
         return None
     try:
-        if len(_json(payload).encode("utf-8")) > MAX_REQUEST_BYTES:
+        if len(_json(normalized).encode("utf-8")) > MAX_REQUEST_BYTES:
             _error("工具桥请求超过 2 MiB。", "request_too_large", 413)
         _bounded_tree(payload)
     except (ValueError, TypeError, RecursionError, UnicodeError):
@@ -446,7 +460,7 @@ def prepare(payload):
         role = message["role"]
         if role != "tool" and pending:
             _error("工具调用必须先收到全部 tool 结果。", "invalid_tool_history")
-        _text(message.get("content"), nullable=role == "assistant" and bool(message.get("tool_calls")))
+        _text(message.get("content"), nullable=role == "assistant" and bool(message.get("tool_calls")), image_refs=bool(images))
         if "function_call" in message:
             _error("不支持旧 function_call 消息。", "unsupported_feature")
         if role == "tool":
@@ -520,10 +534,14 @@ def prepare(payload):
             "No code fences, no prose outside WB_CONTENT. Copy these final two literal lines exactly, then stop:\n"
             + FRAME_END + nonce + "\n" + FRAME_PADDING
         )
+    if images:
+        instruction += ("\nImages are attached separately in image_1, image_2, etc. order. "
+                        "Each image_ref in the conversation identifies the matching attached image, not text to decode. "
+                        "Use the actual image content when answering the corresponding user message.")
     if len((instruction + data + reminder).encode("utf-16-le")) // 2 > MAX_PROMPT_UTF16:
         _error("工具定义和历史超过原生桥 65,536 UTF-16 字符上限。", "request_too_large", 413)
     converted = [{"role": "system", "content": [{"type": "text", "text": instruction}]},
                  {"role": "user", "content": [{"type": "text", "text": data}]},
                  {"role": "system", "content": [{"type": "text", "text": reminder}]}]
     return ToolPlan(converted, nonce, schemas, choice, forced, parallel,
-                    protocol="framed_json_v2" if framed else "json_envelope")
+                    protocol="framed_json_v2" if framed else "json_envelope", images=images)

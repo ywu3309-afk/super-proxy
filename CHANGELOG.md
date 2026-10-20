@@ -1,5 +1,14 @@
 # 更新记录
 
+## 1.2.4（TRAE DeepSeek 图片传输）
+
+- 精确 `trae/deepseek-v4.1-flash` 接通内联 PNG/JPEG/WebP 图片输入。图片经独立私有字段传递，工具协议文本只保留按历史顺序生成的 `image_ref`，不把 Base64 塞入提示词，不丢失历史图片。
+- 采用官方 native signed 上传链：`get_resource_upload_url` → 返回的官方 TOS 主机 PUT 原始字节与 CRC32 → `commit_resource_upload_result`；同一资源同时绑定 `message_content` 和 `multi_media`。不使用当前 Rust 不支持的 `upload_image`，不猜上传端点；签名只发往严格校验的官方上传主机，禁止重定向，上传失败不会降级为纯文本生成。
+- 每次实际请求重新核对精确模型与原生目录 `multimodal === true`；目录能力显式传递至网关和 DSH 配置器。未实现、离线缓存、未知或不支持图片的模型仍声明纯文本，不按模型名猜能力。
+- 仅接受 user 消息中的 PNG/JPEG/WebP dataURI；每次最多 4 张，单张解码不超过 4 MiB、总计不超过 8 MiB，校验规范 Base64、容器头及尺寸。外部 URL、不支持角色及伪造内部引用会明确失败。无新增生产依赖。
+- 修复官方 TRAE 同 EXE 后代进程没有 `--type=` 时误判“未运行”的问题：验证完整官方路径并按祖先关系选唯一根进程；多根、循环及 Inspector 所有权冲突仍拒绝。
+- 保留 structured-text 工具桥的完整帧、随机标记、schema、输出预算及外部客户端执行边界，不修补模型数据，不重放失败请求。
+
 ## 1.2.3（DeepSeek 工具格式与 DSH 图片配置修复）
 
 - 修复 DSH 一键配置只写 `supportsVision`、未写实际生效的 `input` 而拦截图片的问题。Python/JS 配置器从网关明确声明的能力生成 `input: [text, image]`，纯文本、未知或冲突能力显式保留 `[text]`；不根据模型名称猜视觉能力，不将未实现图片通路的 TRAE 伪标为支持图片。WorkBuddy `deepseek-v4.1-flash` 已用无文字随机四色四形图验证图片识别。

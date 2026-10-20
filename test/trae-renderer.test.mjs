@@ -18,7 +18,12 @@ const final = (text = 'MODEL_OK') => event('plan_item', { tool_call_info: { name
 const done = () => event('done', { status: 'completed' });
 
 function runtime(options = {}) {
-  const calls = [], payloads = [];
+  const calls = [], payloads = [], uploads = [];
+  const uploadFetch = async (url, init) => {
+    uploads.push({ url, init });
+    if (options.uploadThrows) throw new Error('private-target-secret');
+    return options.uploadHttpResponse ?? { ok: true, status: 200 };
+  };
   let cancelCount = 0, unsubscribeCount = 0, stopResolved = false;
   const nativePayload = { client_info: { workspace_folder: 'private-folder', workspace_folders: ['private'],
     git_repos: ['private-git'], local_git_repos: ['private-local'], git_metadata_dirs: ['private-meta'],
@@ -54,6 +59,13 @@ function runtime(options = {}) {
           return options.projectResponse ?? { code: 0, data: { code: 0, data: { project_id: 'fixture-project' } } };
         case 'create_session':
           return options.sessionResponse ?? { code: 0, data: { session: { session_id: 'fixture-session' } } };
+        case 'get_resource_upload_url':
+          return options.prepareUploadResponse ?? { code: 0, data: {
+            upload_hosts: ['tos-d-hl.bytedancevod.com'], session_key: 'fixture-session-key',
+            store_infos: [{ store_uri: 'fixture-store/image.png', auth: 'fixture-upload-auth' }]
+          } };
+        case 'commit_resource_upload_result':
+          return options.uploadResponse ?? { code: 0, data: {} };
         case 'stop_chat':
           if (options.stopThrows) throw new Error('private-target-secret');
           if (options.stopDelay) await new Promise((resolve) => setTimeout(resolve, options.stopDelay));
@@ -69,16 +81,16 @@ function runtime(options = {}) {
       return stream;
     }
   };
-  return { client, calls, payloads, nativePayload,
-    deps: { resolveClient: async () => client },
+  return { client, calls, payloads, uploads, nativePayload,
+    deps: { resolveClient: async () => client, fetch: uploadFetch },
     stats: () => ({ cancelCount, unsubscribeCount, stopResolved }),
-    run: (changes = {}) => performTraeOperation({ ...input, ...changes }, moduleUrl, { resolveClient: async () => client }) };
+    run: (changes = {}) => performTraeOperation({ ...input, ...changes }, moduleUrl, { resolveClient: async () => client, fetch: uploadFetch }) };
 }
 
 test('native catalog returns sanitized exact names, not keys or raw payloads', async () => {
   const r = runtime({ models: [preset(modelId, { custom_config: '{"sk":"private-target-secret"}', extra: 'not-exported' })] });
   const result = await r.run({ operation: 'catalog' });
-  assert.deepEqual(result.models, [{ upstreamId: modelId, name: modelId.toUpperCase(), route: 'native_client' }]);
+  assert.deepEqual(result.models, [{ upstreamId: modelId, name: modelId.toUpperCase(), route: 'native_client', supports_vision: false }]);
   assert.equal(result.source, 'native_client');
   assert.equal(typeof result.fetchedAt, 'number');
   assert.deepEqual(r.calls.map((c) => c.method), ['model_list_by_function']);
@@ -99,8 +111,8 @@ test('selected preset numeric limits follow the official custom_model request', 
   assert(!('extra_limit' in custom));
   const catalog = await r.run({ operation: 'catalog', model: undefined });
   assert.deepEqual(catalog.models, [
-    { upstreamId: 'other-model', name: 'OTHER-MODEL', route: 'native_client' },
-    { upstreamId: modelId, name: modelId.toUpperCase(), route: 'native_client' }
+    { upstreamId: 'other-model', name: 'OTHER-MODEL', route: 'native_client', supports_vision: false },
+    { upstreamId: modelId, name: modelId.toUpperCase(), route: 'native_client', supports_vision: false }
   ]);
 });
 
@@ -498,4 +510,127 @@ test('function remains self-contained after toString reconstruction in another r
   const result = await injected(input, moduleUrl, r.deps);
   assert.equal(result.response, 'MODEL_OK');
   assert.equal(result.upstreamModel, modelId + '__dev');
+});
+
+const visionModel = 'deepseek-v4.1-flash';
+const visionImage = { id: 'image_1', mediaType: 'image/png', width: 1, height: 1,
+  data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aWQAAAABJRU5ErkJggg==' };
+function visionRuntime(options = {}) {
+  return runtime({ models: [preset(visionModel, { multimodal: true })], events: [
+    event('model_config', { config_name: visionModel, model_name: visionModel + '__dev' }), final(), done()
+  ], ...options });
+}
+const visionInput = { model: visionModel, images: [visionImage] };
+
+test('vision signs, uploads once, commits and binds the same resource in both chat fields', async () => {
+  const r = visionRuntime();
+  assert.equal((await r.run(visionInput)).response, 'MODEL_OK');
+  assert.deepEqual(r.calls.map(c => c.method), ['model_list_by_function', 'get_or_create_project_v2', 'create_session', 'get_resource_upload_url', 'commit_resource_upload_result', 'chat']);
+  const prepared = r.calls.find(c => c.method === 'get_resource_upload_url');
+  assert.equal(prepared.service, 'multimodal');
+  assert.deepEqual(prepared.context, {});
+  assert.match(prepared.data.targets[0], /^[a-f0-9]{32}_1x1\.trae$/);
+  assert.deepEqual(prepared.data.scale_param, { width: 1, height: 1 });
+  assert.equal(prepared.data.biz_type, 'image');
+  const upload = r.uploads[0];
+  assert.equal(r.uploads.length, 1);
+  assert.equal(upload.url, 'https://tos-d-hl.bytedancevod.com/fixture-store/image.png');
+  assert.equal(upload.init.redirect, 'error');
+  assert.equal(upload.init.headers.Authorization, 'fixture-upload-auth');
+  assert.equal(upload.init.headers['Content-Type'], 'image/png');
+  assert.match(upload.init.headers['Content-CRC32'], /^[a-f0-9]{8}$/);
+  assert.deepEqual(Buffer.from(upload.init.body), Buffer.from(visionImage.data, 'base64'));
+  const commit = r.calls.find(c => c.method === 'commit_resource_upload_result');
+  assert.deepEqual(commit.data, { oids: ['fixture-store/image.png'], session_key: 'fixture-session-key', biz_type: 'image' });
+  const chat = r.calls.find(c => c.method === 'chat');
+  assert.equal(chat.data.custom_model.multimodal, true);
+  assert.deepEqual(chat.data.multi_media, [{ resource_id: 'fixture-store/image.png', resource_type: 'image' }]);
+  assert.deepEqual(chat.data.message_content[1], { type: 'image', image_id: 'fixture-store/image.png' });
+  assert(!chat.data.message_content[0].text_content.includes(visionImage.data));
+});
+
+test('vision requires an exact implemented model and a live strict multimodal boolean before project creation', async () => {
+  for (const model of [preset(visionModel), preset(visionModel, { multimodal: false }),
+    preset(visionModel, { multimodal: 'true' }), preset(modelId, { multimodal: true })]) {
+    const r = visionRuntime({ models: [model] });
+    const result = await r.run({ model: model.name, images: [visionImage] });
+    assert.equal(result.error.code, 'image_not_supported');
+    assert.deepEqual(r.calls.map(c => c.method), ['model_list_by_function']);
+  }
+});
+
+test('catalog vision is explicit, exact-ID-only and never inferred from a friendly name', async () => {
+  const r = runtime({ models: [preset(visionModel, { multimodal: true }),
+    preset('DeepSeek-V4-Flash-Official', { multimodal: true }),
+    preset('fake', { multimodal: true, display_name: visionModel })] });
+  const value = await r.run({ operation: 'catalog' });
+  assert.deepEqual(value.models.map(m => m.supports_vision), [true, false, false]);
+});
+
+test('image upload failure is fixed and does not start generation or silently send text alone', async () => {
+  for (const options of [{ uploadThrows: true }, { uploadResponse: { code: 4001, message: 'private-target-secret' } },
+    { uploadResponse: { code: 0, data: { code: 4001 } } }, { uploadResponse: {} }, { uploadResponse: null, uploadThrows: true }]) {
+    const r = visionRuntime(options);
+    const value = await r.run(visionInput);
+    assert.equal(value.error.code, 'image_upload_failed');
+    assert(!r.calls.some(c => c.method === 'chat' || c.method === 'stop_chat'));
+    assert(!JSON.stringify(value).includes('private-target-secret'));
+  }
+});
+
+test('multiple images preserve order and use distinct bound resource IDs', async () => {
+  const r = visionRuntime();
+  assert.equal((await r.run({ model: visionModel, images: [visionImage, { ...visionImage, id: 'image_2' }] })).response, 'MODEL_OK');
+  const prepared = r.calls.filter(c => c.method === 'get_resource_upload_url');
+  assert.equal(new Set(prepared.map(c => c.data.targets[0])).size, 2);
+  assert.equal(r.uploads.length, 2);
+  const uploads = r.calls.filter(c => c.method === 'commit_resource_upload_result').map(c => c.data.oids[0]);
+  const chat = r.calls.find(c => c.method === 'chat');
+  assert.deepEqual(chat.data.multi_media.map(i => i.resource_id), uploads);
+  assert.deepEqual(chat.data.message_content.slice(1).map(i => i.image_id), uploads);
+});
+
+test('malformed image inputs are rejected before resolving the official runtime', async () => {
+  let resolves = 0;
+  const deps = { resolveClient: () => { resolves++; throw new Error('private-target-secret'); } };
+  for (const images of [null, {}, [null], [{ ...visionImage, id: 'image_2' }], [{ ...visionImage, data: '%%%=' }],
+    [{ ...visionImage, mediaType: 'image/svg+xml' }], [{ ...visionImage, width: 0 }],
+    [{ ...visionImage, height: 16385 }], [{ ...visionImage, width: 10000, height: 10000 }],
+    [{ ...visionImage, extra: true }], Array(5).fill(visionImage)]) {
+    // null is an explicitly malformed images field, not an omitted field.
+    const value = await performTraeOperation({ ...input, ...visionInput, images }, moduleUrl, deps);
+    assert.equal(value.error.code, 'invalid_input');
+  }
+  assert.equal(resolves, 0);
+});
+
+test('signed upload metadata cannot redirect credentials to another host or an unsafe path', async () => {
+  for (const data of [
+    { upload_hosts: ['evil.invalid'], store_infos: [{store_uri:'a',auth:'secret'}],session_key:'key' },
+    { upload_hosts: ['tos-d-hl.bytedancevod.com'], store_infos: [{store_uri:'../a',auth:'secret'}],session_key:'key' },
+    { upload_hosts: ['tos-d-hl.bytedancevod.com'], store_infos: [{store_uri:'a?token=b',auth:'secret'}],session_key:'key' },
+    { upload_hosts: ['tos-d-hl.bytedancevod.com'], store_infos: [{store_uri:'a',auth:'secret\r\nOther: x'}],session_key:'key' }
+  ]) {
+    const r=visionRuntime({prepareUploadResponse:{code:0,data}});
+    assert.equal((await r.run(visionInput)).error.code,'image_upload_failed');
+    assert.equal(r.uploads.length,0);
+    assert(!r.calls.some(c=>c.method==='chat'||c.method==='commit_resource_upload_result'));
+  }
+});
+
+test('failed PUT never commits or starts chat and override_resource_id is preserved on success', async () => {
+  const failed=visionRuntime({uploadHttpResponse:{ok:false,status:403}});
+  assert.equal((await failed.run(visionInput)).error.code,'image_upload_failed');
+  assert(!failed.calls.some(c=>c.method==='chat'||c.method==='commit_resource_upload_result'));
+  const r=visionRuntime({prepareUploadResponse:{code:0,data:{upload_hosts:['tos-d-hl.bytedancevod.com'],
+    store_infos:[{store_uri:'a',override_resource_id:'resource-override',auth:'signed'}],session_key:'key'}}});
+  assert.equal((await r.run(visionInput)).response,'MODEL_OK');
+  assert.equal(r.calls.find(c=>c.method==='chat').data.multi_media[0].resource_id,'resource-override');
+});
+
+test('official signed hosts may rotate within TOS bytedancevod and commit data may be null', async () => {
+  const r=visionRuntime({prepareUploadResponse:{code:0,data:{upload_hosts:['tos-d-lf.bytedancevod.com'],
+    store_infos:[{store_uri:'a',auth:'signed'}],session_key:'key'}},uploadResponse:{code:0,data:null}});
+  assert.equal((await r.run(visionInput)).response,'MODEL_OK');
+  assert.equal(r.uploads[0].url,'https://tos-d-lf.bytedancevod.com/a');
 });

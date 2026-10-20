@@ -14,7 +14,9 @@ async function performTraeOperation(input, moduleUrl, deps) {
     upstream_model_mismatch: 'TRAE 返回的模型配置与所选模型不一致。',
     upstream_model_unconfirmed: 'TRAE 未确认所选模型的实际配置。',
     incomplete_response: 'TRAE 响应未完整结束。', empty_response: 'TRAE 未返回有效文本。',
-    upstream_error: 'TRAE 对话失败，已请求停止。', stop_failed: 'TRAE 停止请求未确认完成。'
+    upstream_error: 'TRAE 对话失败，已请求停止。', stop_failed: 'TRAE 停止请求未确认完成。',
+    image_not_supported: '当前 TRAE 模型未声明图片能力。',
+    image_upload_failed: 'TRAE 图片上传失败，未开始模型生成。'
   };
   const failure = (code) => Object.assign(new Error(messages[code]), { safeCode: code });
   const modelPattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/;
@@ -92,7 +94,10 @@ async function performTraeOperation(input, moduleUrl, deps) {
             selectedModelLimits[key] = limit;
           }
         }
-        result.push({ upstreamId: model.name, name, route: 'native_client' });
+        // Only this exact, verified route has an implemented image transport.
+        // Native catalog evidence is still required on every request.
+        result.push({ upstreamId: model.name, name, route: 'native_client',
+          supports_vision: model.name === 'deepseek-v4.1-flash' && model.multimodal === true });
         seen.add(model.name);
       }
     }
@@ -140,6 +145,22 @@ async function performTraeOperation(input, moduleUrl, deps) {
     if (input.operation === 'chat' && (typeof input.model !== 'string' || !modelPattern.test(input.model)
         || typeof input.prompt !== 'string' || !input.prompt.trim() || input.prompt.length > 65536
         || input.prompt.includes('\0'))) throw failure('invalid_input');
+    const images = input.images === undefined ? [] : input.images;
+    if (!Array.isArray(images) || images.length > 4 || (input.operation !== 'chat' && images.length)) {
+      throw failure('invalid_input');
+    }
+    let imageBytes = 0;
+    for (const [index, image] of images.entries()) {
+      if (!isObject(image) || Object.keys(image).sort().join(',') !== 'data,height,id,mediaType,width'
+          || image.id !== 'image_' + (index + 1) || !['image/png', 'image/jpeg', 'image/webp'].includes(image.mediaType)
+          || typeof image.data !== 'string' || !image.data.length || image.data.length > 5592408
+          || image.data.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(image.data)
+          || !Number.isSafeInteger(image.width) || !Number.isSafeInteger(image.height)
+          || image.width < 1 || image.height < 1 || image.width > 16384 || image.height > 16384
+          || image.width * image.height > 40000000) throw failure('invalid_input');
+      const bytes = image.data.length / 4 * 3 - (image.data.endsWith('==') ? 2 : image.data.endsWith('=') ? 1 : 0);
+      if (bytes > 4 * 1024 * 1024 || (imageBytes += bytes) > 8 * 1024 * 1024) throw failure('invalid_input');
+    }
     deadline = Date.now() + timeoutMs;
     try {
       if (deps && typeof deps.resolveClient === 'function') {
@@ -169,6 +190,7 @@ async function performTraeOperation(input, moduleUrl, deps) {
     if (input.operation === 'catalog') return { models, source: 'native_client', fetchedAt: Date.now() / 1000 };
     const model = models.find((candidate) => candidate.upstreamId === input.model);
     if (!model) throw failure('model_unavailable');
+    if (images.length && !model.supports_vision) throw failure('image_not_supported');
     if (typeof sandbox.requestForStream !== 'function') throw failure('native_client_unavailable');
     const project = unwrap(await request('lite', 'get_or_create_project_v2', { project_kind: 'empty' }));
     projectId = project.project_id;
@@ -177,14 +199,73 @@ async function performTraeOperation(input, moduleUrl, deps) {
       { project_id: projectId }));
     sessionId = session.session?.session_id;
     if (typeof sessionId !== 'string' || !sessionId || sessionId.length > 256) throw failure('invalid_native_response');
+    const resources = [];
+    for (const image of images) {
+      let resourceId;
+      try {
+        // Official ImageUploadTransport (solo-lite module 9052) exposes signed
+        // upload via these two native methods. upload_image is unsupported by
+        // the current native Rust runtime, so never retry it or send text alone.
+        const preparation = await request('multimodal', 'get_resource_upload_url', {
+          targets: [globalThis.crypto.randomUUID().replace(/-/g, '') + '_' + image.width + 'x' + image.height + '.trae'],
+          biz_type: 'image', scale_param: { width: image.width, height: image.height }
+        });
+        if (!isObject(preparation) || preparation.code !== 0 || !isObject(preparation.data)) throw failure('image_upload_failed');
+        const prepared = preparation.data;
+        const store = prepared.store_infos?.[0], host = prepared.upload_hosts?.[0];
+        if (!Array.isArray(prepared.store_infos) || prepared.store_infos.length !== 1
+            || !Array.isArray(prepared.upload_hosts) || !isObject(store)
+            || typeof host !== 'string' || !/^tos-[a-z0-9-]+\.bytedancevod\.com$/.test(host)
+            || typeof store.store_uri !== 'string' || store.store_uri.length > 2048
+            || !/^[A-Za-z0-9._/-]+$/.test(store.store_uri)
+            || store.store_uri.split('/').some((part) => part === '.' || part === '..')
+            || !store.store_uri.replace(/^\/+/, '')
+            || typeof store.auth !== 'string' || !store.auth || store.auth.length > 16384
+            || /[\r\n\0]/.test(store.auth) || typeof prepared.session_key !== 'string'
+            || !prepared.session_key || prepared.session_key.length > 16384
+            || (store.override_resource_id != null && (typeof store.override_resource_id !== 'string'
+              || store.override_resource_id.length > 4096 || /[\p{C}]/u.test(store.override_resource_id)))) {
+          throw failure('image_upload_failed');
+        }
+        const bytes = Uint8Array.from(globalThis.atob(image.data), (value) => value.charCodeAt(0));
+        let crc = -1;
+        for (const byte of bytes) {
+          crc ^= byte;
+          for (let bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ ((crc & 1) ? 0xedb88320 : 0);
+        }
+        const checksum = ((crc ^ -1) >>> 0).toString(16).padStart(8, '0');
+        const controller = new AbortController();
+        try {
+          const upload = await limited((deps?.fetch || globalThis.fetch)(
+            'https://' + host + '/' + store.store_uri.replace(/^\/+/, ''), {
+              method: 'PUT', redirect: 'error', signal: controller.signal, body: bytes,
+              headers: { 'Content-Type': image.mediaType, Authorization: store.auth, 'Content-CRC32': checksum }
+            }), remaining());
+          if (!upload || upload.ok !== true || !Number.isInteger(upload.status)
+              || upload.status < 200 || upload.status >= 300) throw failure('image_upload_failed');
+        } finally { controller.abort(); }
+        const committed = await request('multimodal', 'commit_resource_upload_result', {
+          oids: [store.store_uri], session_key: prepared.session_key, biz_type: 'image'
+        });
+        if (!isObject(committed) || committed.code !== 0) throw failure('image_upload_failed');
+        unwrap(committed); // data:null is valid; an explicit nested nonzero code is not.
+        resourceId = store.override_resource_id || store.store_uri;
+      } catch (error) {
+        if (error?.safeCode === 'timeout') throw error;
+        throw failure('image_upload_failed');
+      }
+      resources.push(resourceId);
+    }
     messageId = globalThis.crypto.randomUUID().replace(/-/g, '').slice(0, 24);
     const data = { agent_type: 'chat', session_id: sessionId, message_id: messageId, mention_context: {},
       model_name: model.upstreamId,
       custom_model: { provider: '', config_name: model.upstreamId, display_model_name: model.name,
-        multimodal: false, ak: '', sk: '', base_url: '', auth_type: 0, use_remote_service: true,
+        multimodal: resources.length > 0, ak: '', sk: '', base_url: '', auth_type: 0, use_remote_service: true,
         is_preset: true, config_source: 1, ...selectedModelLimits }, terminal_context: [],
-      message_content: [{ type: 'text', text_content: '仅返回纯文本，不调用 TRAE 内置工具，不读取或修改文件，不执行命令。若输入要求生成外部工具协议 JSON，仅将它作为文本输出，由外部客户端执行。\n\n' + input.prompt }],
-      code_selections: [], scene_location: 2, parsed_query: [], multi_media: [], workspace_folders: [],
+      message_content: [{ type: 'text', text_content: '仅返回纯文本，不调用 TRAE 内置工具，不读取或修改文件，不执行命令。若输入要求生成外部工具协议 JSON，仅将它作为文本输出，由外部客户端执行。\n\n' + input.prompt },
+        ...resources.map((resourceId) => ({ type: 'image', image_id: resourceId }))],
+      code_selections: [], scene_location: 2, parsed_query: [],
+      multi_media: resources.map((resourceId) => ({ resource_id: resourceId, resource_type: 'image' })), workspace_folders: [],
       is_workspace_folder_changed: false, active_text_editor: null, asr_times: 0 };
     chatStarted = true;
     stream = await limited(Promise.resolve(sandbox.requestForStream({ service: 'chat', method: 'chat', data,

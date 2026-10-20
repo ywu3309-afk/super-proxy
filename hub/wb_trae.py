@@ -446,13 +446,21 @@ class TraeProvider:
                                 "route": model.get("route", "legacy_http"),
                                 "source": model.get("source", row.get("catalogSource", "legacy_http")),
                                 "streaming": "buffered" if model.get("route") == "native_client" else "sse"}
+                            if "supports_vision" in model:
+                                models[mid]["supports_vision"] = (mid == "trae/deepseek-v4.1-flash"
+                                    and model.get("route") == "native_client"
+                                    and model.get("source", row.get("catalogSource")) == "native_client"
+                                    and row.get("nativeConnected") is True
+                                    and model.get("supports_vision") is True)
             return {"provider": "trae", "accounts": accounts, "models": list(models.values()),
                     "client": {**self._client(), "nativeBridgeConfigured": bool(getattr(self._native, "configured", False))},
                     "creditsScope": "account_pool_not_model_entitlement"}
 
     def models(self):
         return [{"id": m["id"], "object": "model", "owned_by": "trae", "name": m["name"],
-                 "route": m["route"], "streaming": m["streaming"], "source": m["source"]}
+                 "route": m["route"], "streaming": m["streaming"], "source": m["source"],
+                 "supports_vision": m.get("supports_vision") is True,
+                 "input": ["text", "image"] if m.get("supports_vision") is True else ["text"]}
                 for m in self.status()["models"]]
 
     def import_account(self, payload):
@@ -848,11 +856,16 @@ class TraeProvider:
                     (key == "max_tokens" and (not isinstance(number, int) or not 1 <= number <= 65536))):
                     raise TraeError(400, key + " 超出支持范围。", "invalid_request")
                 body[key] = number
+        # The 2 MiB ceiling applies only to the normalized text/tool envelope.
+        # Inline image bytes remain private in _images and are governed by the
+        # 16 MiB input limit in wb_trae_images, not duplicated into this body.
         if len(_compact(body)) > 2 * 1024 * 1024:
-            raise TraeError(413, "TRAE 请求体超过 2 MiB。", "request_too_large")
+            raise TraeError(413, "TRAE 文本请求体超过 2 MiB。", "request_too_large")
         if tool_plan:
             # Private in-memory plan; never send this object to either upstream.
             body["_tool_plan"] = tool_plan
+            if tool_plan.images:
+                body["_images"] = tool_plan.images
         return model, body
 
     def _choose(self, model):
@@ -889,6 +902,8 @@ class TraeProvider:
             if config.get("route") == "native_client":
                 yield from self._native_stream(row, model, body)
                 return
+            if body.get("_images"):
+                raise TraeError(422, "图片输入需要 TRAE 原生客户端路由。", "image_not_supported")
             if body.get("_tool_plan"):
                 raise TraeError(422, "工具桥接需要 TRAE 原生客户端模型，请刷新目录并选择新模型。", "tools_require_native_client")
             credentials = self._credentials(row)
@@ -976,7 +991,8 @@ class TraeProvider:
         credentials = self._credentials(row)
         max_chars = max(256, min(65536, int(body.get("max_tokens", 512)) * 16))
         try:
-            value = self._native.chat(credentials.get("uid", ""), model[5:], body["messages"], max_chars=max_chars)
+            options = {"images": body["_images"]} if body.get("_images") else {}
+            value = self._native.chat(credentials.get("uid", ""), model[5:], body["messages"], max_chars=max_chars, **options)
         except NativeBridgeError as error:
             failure = TraeError(error.status, error.message, error.code)
             self._mark_error(row, failure)

@@ -4,6 +4,8 @@ const { execFile } = require('node:child_process');
 const path = require('node:path');
 
 const MAX_BODY = 1024 * 1024;
+const MAX_CHAT_BODY = 16 * MAX_BODY;
+const MAX_IMAGE_BYTES = 4 * MAX_BODY;
 const CANCEL_GRACE_MS = 15000;
 const MODULE_DISCOVERY_MS = 5000;
 const CDP_GRACE_MS = 5000;
@@ -26,6 +28,8 @@ const MESSAGES = Object.freeze({
   UPSTREAM_MODEL_MISMATCH: 'TRAE 返回的模型与所选模型不一致',
   UPSTREAM_MODEL_UNCONFIRMED: 'TRAE 未返回可核验的上游模型身份',
   MODEL_UNAVAILABLE: '所选模型不在当前 TRAE 原生目录中',
+  IMAGE_NOT_SUPPORTED: '当前TRAE模型未声明图片能力',
+  IMAGE_UPLOAD_FAILED: '上传失败未开始模型生成',
   NATIVE_CLIENT_UNAVAILABLE: '无法访问当前 TRAE 原生客户端',
   CATALOG_UNAVAILABLE: 'TRAE 未返回可用的原生模型目录',
   INCOMPLETE_RESPONSE: 'TRAE 响应未完整结束', EMPTY_RESPONSE: 'TRAE 未返回有效文本',
@@ -40,6 +44,7 @@ const RENDERER_CODES = Object.freeze({
   upstream_model_mismatch: 'UPSTREAM_MODEL_MISMATCH', model_mismatch: 'UPSTREAM_MODEL_MISMATCH',
   upstream_model_unconfirmed: 'UPSTREAM_MODEL_UNCONFIRMED',
   model_unavailable: 'MODEL_UNAVAILABLE', native_client_unavailable: 'NATIVE_CLIENT_UNAVAILABLE',
+  image_not_supported: 'IMAGE_NOT_SUPPORTED', image_upload_failed: 'IMAGE_UPLOAD_FAILED',
   catalog_unavailable: 'CATALOG_UNAVAILABLE', incomplete_response: 'INCOMPLETE_RESPONSE',
   empty_response: 'EMPTY_RESPONSE', upstream_error: 'UPSTREAM_ERROR',
   native_request_failed: 'NATIVE_REQUEST_FAILED', invalid_native_response: 'INVALID_NATIVE_RESPONSE'
@@ -76,15 +81,36 @@ async function discoverTrae() {
   const escaped = expected.replace(/'/g, "''");
   const rows = await powershell(`$ErrorActionPreference='Stop'; @(
     Get-CimInstance Win32_Process | Where-Object {
-      $_.ExecutablePath -ieq '${escaped}' -and $_.CommandLine -notmatch '--type='
-    } | Select-Object ProcessId, ExecutablePath
+      $_.ExecutablePath -ieq '${escaped}'
+    } | Select-Object ProcessId, ParentProcessId, ExecutablePath,
+      @{Name='HasType';Expression={ [bool]($_.CommandLine -match '--type=') }}
   ) | ConvertTo-Json -Compress`);
   const list = Array.isArray(rows) ? rows : [rows];
-  if (list.length !== 1 || !Number.isSafeInteger(list[0].ProcessId) || list[0].ProcessId < 1 ||
-      typeof list[0].ExecutablePath !== 'string' || list[0].ExecutablePath.toLowerCase() !== expected.toLowerCase()) {
-    throw failure('TRAE_NOT_RUNNING');
+  return selectOfficialTraeRoot(list, expected);
+}
+
+function selectOfficialTraeRoot(rows, expected) {
+  if (!Array.isArray(rows) || !rows.length || typeof expected !== 'string') throw failure('TRAE_NOT_RUNNING');
+  const byId = new Map();
+  for (const row of rows) {
+    if (!row || !Number.isSafeInteger(row.ProcessId) || row.ProcessId < 1 ||
+        !Number.isSafeInteger(row.ParentProcessId) || row.ParentProcessId < 0 ||
+        typeof row.ExecutablePath !== 'string' || row.ExecutablePath.toLowerCase() !== expected.toLowerCase() ||
+        typeof row.HasType !== 'boolean' || byId.has(row.ProcessId)) throw failure('TRAE_NOT_RUNNING');
+    byId.set(row.ProcessId, row);
   }
-  return { pid: list[0].ProcessId };
+  for (const row of rows) {
+    const seen = new Set([row.ProcessId]);
+    let parent = row.ParentProcessId;
+    while (byId.has(parent)) {
+      if (seen.has(parent)) throw failure('TRAE_NOT_RUNNING');
+      seen.add(parent);
+      parent = byId.get(parent).ParentProcessId;
+    }
+  }
+  const roots = rows.filter((row) => !byId.has(row.ParentProcessId));
+  if (roots.length !== 1 || roots[0].HasType) throw failure('TRAE_NOT_RUNNING');
+  return { pid: roots[0].ProcessId };
 }
 
 async function inspectorOwners() {
@@ -269,12 +295,136 @@ async function nativeOperation(input, options) {
   }
 }
 
+// Header/container checks only; no image decoder, network request, or file access.
+function imageDimensions(bytes, mediaType) {
+  const bad = () => { throw failure('BAD_REQUEST'); };
+  if (mediaType === 'image/png') {
+    if (bytes.length < 45 || !bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) bad();
+    let position = 8;
+    let dimensions;
+    let imageData = false;
+    let ended = false;
+    while (position + 12 <= bytes.length) {
+      const length = bytes.readUInt32BE(position);
+      const type = bytes.toString('ascii', position + 4, position + 8);
+      if (length > bytes.length - position - 12) bad();
+      if (position === 8) {
+        if (type !== 'IHDR' || length !== 13) bad();
+        dimensions = [bytes.readUInt32BE(position + 8), bytes.readUInt32BE(position + 12)];
+        const depth = bytes[position + 16], color = bytes[position + 17];
+        const depths = { 0: [1, 2, 4, 8, 16], 2: [8, 16], 3: [1, 2, 4, 8], 4: [8, 16], 6: [8, 16] };
+        if (!depths[color]?.includes(depth) || bytes[position + 18] !== 0 || bytes[position + 19] !== 0 || bytes[position + 20] > 1) bad();
+      } else if (type === 'IHDR') bad();
+      if (type === 'IDAT' && length > 0) imageData = true;
+      position += length + 12;
+      if (type === 'IEND') {
+        if (length !== 0 || position !== bytes.length) bad();
+        ended = true;
+        break;
+      }
+    }
+    if (!dimensions || !imageData || !ended) bad();
+    return dimensions;
+  }
+  if (mediaType === 'image/jpeg') {
+    if (bytes.length < 12 || bytes[0] !== 255 || bytes[1] !== 216 ||
+        bytes[bytes.length - 2] !== 255 || bytes[bytes.length - 1] !== 217) bad();
+    let position = 2;
+    let dimensions;
+    while (position < bytes.length - 2) {
+      if (bytes[position++] !== 255) bad();
+      while (bytes[position] === 255) position++;
+      const marker = bytes[position++];
+      if (marker === 0 || marker === 216 || marker === 217 || marker === undefined) bad();
+      if (marker === 1 || (marker >= 208 && marker <= 215)) continue;
+      if (position + 2 > bytes.length) bad();
+      const length = bytes.readUInt16BE(position);
+      if (length < 2 || position + length > bytes.length) bad();
+      if ([192, 193, 194, 195, 197, 198, 199, 201, 202, 203, 205, 206, 207].includes(marker)) {
+        if (dimensions || length < 11 || bytes[position + 7] < 1 || length !== 8 + 3 * bytes[position + 7]) bad();
+        dimensions = [bytes.readUInt16BE(position + 5), bytes.readUInt16BE(position + 3)];
+      }
+      if (marker === 218) {
+        if (!dimensions || position + length >= bytes.length - 2) bad();
+        return dimensions;
+      }
+      position += length;
+    }
+    bad();
+  }
+  if (mediaType === 'image/webp') {
+    if (bytes.length < 26 || bytes.toString('ascii', 0, 4) !== 'RIFF' ||
+        bytes.toString('ascii', 8, 12) !== 'WEBP' || bytes.readUInt32LE(4) + 8 !== bytes.length) bad();
+    let position = 12;
+    let dimensions;
+    let canvas;
+    let imageData = false;
+    while (position + 8 <= bytes.length) {
+      const type = bytes.toString('ascii', position, position + 4);
+      const length = bytes.readUInt32LE(position + 4);
+      const start = position + 8;
+      const end = start + length;
+      if (end + (length & 1) > bytes.length) bad();
+      if (type === 'VP8X') {
+        if (position !== 12 || length !== 10 || canvas) bad();
+        canvas = [bytes.readUIntLE(start + 4, 3) + 1, bytes.readUIntLE(start + 7, 3) + 1];
+      } else if (type === 'VP8 ' || type === 'VP8L') {
+        let current;
+        if (type === 'VP8 ') {
+          if (length < 10 || (bytes[start] & 1) || !bytes.subarray(start + 3, start + 6).equals(Buffer.from([157, 1, 42]))) bad();
+          current = [bytes.readUInt16LE(start + 6) & 16383, bytes.readUInt16LE(start + 8) & 16383];
+        } else {
+          if (length < 5 || bytes[start] !== 47) bad();
+          const bits = bytes.readUInt32LE(start + 1);
+          if (bits >>> 29) bad();
+          current = [(bits & 16383) + 1, ((bits >>> 14) & 16383) + 1];
+        }
+        if (dimensions) bad();
+        dimensions = current;
+        imageData = true;
+      } else if (type === 'ANMF') {
+        if (!canvas || length < 24) bad();
+        const x = bytes.readUIntLE(start, 3) * 2, y = bytes.readUIntLE(start + 3, 3) * 2;
+        const width = bytes.readUIntLE(start + 6, 3) + 1, height = bytes.readUIntLE(start + 9, 3) + 1;
+        if (x + width > canvas[0] || y + height > canvas[1]) bad();
+        imageData = true;
+      }
+      position = end + (length & 1);
+    }
+    if (position !== bytes.length || !imageData || (!canvas && !dimensions) ||
+        (canvas && dimensions && (canvas[0] !== dimensions[0] || canvas[1] !== dimensions[1]))) bad();
+    return canvas || dimensions;
+  }
+  bad();
+}
+
+function validateImages(images) {
+  if (!Array.isArray(images) || images.length < 1 || images.length > 4) throw failure('BAD_REQUEST');
+  let total = 0;
+  for (let index = 0; index < images.length; index++) {
+    const image = images[index];
+    if (!image || typeof image !== 'object' || Array.isArray(image) ||
+        Object.keys(image).length !== 5 || Object.keys(image).some((key) => !['id', 'mediaType', 'data', 'width', 'height'].includes(key))) throw failure('BAD_REQUEST');
+    if (image.id !== `image_${index + 1}` || !['image/png', 'image/jpeg', 'image/webp'].includes(image.mediaType) ||
+        !Number.isSafeInteger(image.width) || !Number.isSafeInteger(image.height) ||
+        image.width < 1 || image.height < 1 || image.width > 16384 || image.height > 16384 || image.width * image.height > 40000000 ||
+        typeof image.data !== 'string' || !image.data.length || image.data.length > 4 * Math.ceil(MAX_IMAGE_BYTES / 3) ||
+        image.data.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(image.data)) throw failure('BAD_REQUEST');
+    const bytes = Buffer.from(image.data, 'base64');
+    total += bytes.length;
+    if (!bytes.length || bytes.length > MAX_IMAGE_BYTES || total > 8 * MAX_BODY || bytes.toString('base64') !== image.data) throw failure('BAD_REQUEST');
+    const [width, height] = imageDimensions(bytes, image.mediaType);
+    if (width !== image.width || height !== image.height) throw failure('BAD_REQUEST');
+  }
+}
+
 function validateInput(body, operation) {
   if (!body || typeof body !== 'object' || Array.isArray(body) ||
-      Object.keys(body).some((key) => !['uid', 'model', 'prompt', 'maxChars', 'timeoutMs'].includes(key)) ||
+      Object.keys(body).some((key) => !['uid', 'model', 'prompt', 'maxChars', 'timeoutMs', ...(operation === 'chat' ? ['images'] : [])].includes(key)) ||
       typeof body.uid !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(body.uid)) {
     throw failure('BAD_REQUEST');
   }
+  if (Object.hasOwn(body, 'images')) validateImages(body.images);
   if ((body.model !== undefined && (typeof body.model !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(body.model))) ||
       (body.prompt !== undefined && (typeof body.prompt !== 'string' || !body.prompt.trim() || body.prompt.length > 65536 || body.prompt.includes('\0'))) ||
       (operation === 'chat' && (!body.model || !body.prompt)) ||
@@ -286,7 +436,7 @@ function validateInput(body, operation) {
   return { ...body, operation, maxChars: body.maxChars ?? 16384, timeoutMs: body.timeoutMs ?? 90000 };
 }
 
-function readBody(request) {
+function readBody(request, limit = MAX_BODY) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let size = 0;
@@ -302,7 +452,7 @@ function readBody(request) {
     };
     const data = (chunk) => {
       size += chunk.length;
-      if (size > MAX_BODY) finish(failure('PAYLOAD_TOO_LARGE'));
+      if (size > limit) finish(failure('PAYLOAD_TOO_LARGE'));
       else chunks.push(chunk);
     };
     const end = () => {
@@ -320,6 +470,8 @@ function safeResult(value) {
     const code = value.error?.code || value.code;
     throw failure(Object.hasOwn(RENDERER_CODES, code) ? RENDERER_CODES[code] : code);
   }
+  if (Array.isArray(value.models) && value.models.some((model) => model && typeof model === 'object' &&
+      Object.hasOwn(model, 'supports_vision') && typeof model.supports_vision !== 'boolean')) throw failure('INVALID_NATIVE_RESPONSE');
   const serialized = JSON.stringify(value, (key, entry) =>
     /^(?:uid|user_?id|user|token|access_?token|refresh_?token|cookie|authorization|password|secret|api_?key|private_?key|credentials?|headers?)$/i.test(key) ? undefined : entry);
   if (serialized.length > MAX_BODY) throw failure('NATIVE_FAILED');
@@ -345,9 +497,10 @@ async function createTraeBridge(options = {}) {
       if (supplied.length !== expectedToken.length || !timingSafeEqual(supplied, expectedToken)) throw failure('UNAUTHORIZED');
       if (request.method !== 'POST' || !['/catalog', '/chat'].includes(request.url)) throw failure('NOT_FOUND');
       if (!/^application\/json(?:\s*;|$)/i.test(request.headers['content-type'] || '')) throw failure('BAD_REQUEST');
-      if (Number(request.headers['content-length']) > MAX_BODY) throw failure('PAYLOAD_TOO_LARGE');
+      const bodyLimit = request.url === '/chat' ? MAX_CHAT_BODY : MAX_BODY;
+      if (Number(request.headers['content-length']) > bodyLimit) throw failure('PAYLOAD_TOO_LARGE');
       if (operationBusy) throw failure('BUSY');
-      const input = validateInput(await readBody(request), request.url.slice(1));
+      const input = validateInput(await readBody(request, bodyLimit), request.url.slice(1));
       if (operationBusy) throw failure('BUSY');
       operationBusy = true; ownsBusy = true;
       const result = await (options.runOperation || ((value) => nativeOperation(value, options)))(input);
@@ -378,4 +531,4 @@ async function createTraeBridge(options = {}) {
   };
 }
 
-module.exports = { createTraeBridge };
+module.exports = { createTraeBridge, selectOfficialTraeRoot };

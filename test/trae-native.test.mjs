@@ -6,7 +6,7 @@ import { EventEmitter } from 'node:events';
 import vm from 'node:vm';
 
 const require = createRequire(import.meta.url);
-const { createTraeBridge } = require('../desktop/trae-native.cjs');
+const { createTraeBridge, selectOfficialTraeRoot } = require('../desktop/trae-native.cjs');
 const account = { uid: 'fixture-account' };
 
 function request(bridge, { route = '/catalog', body = account, headers = {}, method = 'POST', raw } = {}) {
@@ -362,6 +362,7 @@ test('renderer fixed error codes retain semantics without forwarding native mess
     upstream_model_mismatch: 'UPSTREAM_MODEL_MISMATCH', model_mismatch: 'UPSTREAM_MODEL_MISMATCH',
     upstream_model_unconfirmed: 'UPSTREAM_MODEL_UNCONFIRMED',
     model_unavailable: 'MODEL_UNAVAILABLE', native_client_unavailable: 'NATIVE_CLIENT_UNAVAILABLE',
+    image_not_supported: 'IMAGE_NOT_SUPPORTED', image_upload_failed: 'IMAGE_UPLOAD_FAILED',
     catalog_unavailable: 'CATALOG_UNAVAILABLE', incomplete_response: 'INCOMPLETE_RESPONSE',
     empty_response: 'EMPTY_RESPONSE', upstream_error: 'UPSTREAM_ERROR',
     native_request_failed: 'NATIVE_REQUEST_FAILED', invalid_native_response: 'INVALID_NATIVE_RESPONSE'
@@ -432,4 +433,161 @@ test('renderer stop acknowledgement gets fifteen-second grace and CDP keeps an e
     assert.equal(fixture.stats().socketsClosed, 1);
     assert.equal(jobs.size, 0);
   } finally { await bridge.close(); }
+});
+
+const pngFixture = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=', 'base64');
+const chatFixture = { ...account, model: 'fixture', prompt: 'describe fixtures' };
+function imageFixture(bytes = pngFixture, mediaType = 'image/png', width = 1, height = 1, id = 'image_1') {
+  return { id, mediaType, data: bytes.toString('base64'), width, height };
+}
+function pngSized(length) {
+  assert.ok(length >= pngFixture.length + 12);
+  const chunk = Buffer.alloc(length - pngFixture.length);
+  chunk.writeUInt32BE(chunk.length - 12, 0);
+  chunk.write('tEXt', 4);
+  return Buffer.concat([pngFixture.subarray(0, -12), chunk, pngFixture.subarray(-12)]);
+}
+function webpFixture(kind = 'VP8L', width = 1, height = 1) {
+  const content = Buffer.alloc(kind === 'VP8L' ? 5 : 10);
+  if (kind === 'VP8L') {
+    content[0] = 47;
+    content.writeUInt32LE(((height - 1) << 14) | (width - 1), 1);
+  } else {
+    content.set([157, 1, 42], 3);
+    content.writeUInt16LE(width, 6); content.writeUInt16LE(height, 8);
+  }
+  const bytes = Buffer.alloc(20 + content.length + (content.length & 1));
+  bytes.write('RIFF', 0); bytes.writeUInt32LE(bytes.length - 8, 4); bytes.write('WEBP', 8);
+  bytes.write(kind === 'VP8L' ? 'VP8L' : 'VP8 ', 12); bytes.writeUInt32LE(content.length, 16); content.copy(bytes, 20);
+  return bytes;
+}
+function jpegFixture(width = 1, height = 1) {
+  // SOI + one-component SOF0 + SOS + bounded fixture scan + EOI.
+  const bytes = Buffer.from([255,216,255,192,0,11,8,0,1,0,1,1,1,17,0,255,218,0,8,1,1,0,0,63,0,0,255,217]);
+  bytes.writeUInt16BE(height, 7); bytes.writeUInt16BE(width, 9);
+  return bytes;
+}
+
+test('image bridge preserves exact validated PNG, JPEG and WebP image descriptors', async () => {
+  const calls = [];
+  const bridge = await createTraeBridge({ runOperation: async (input) => { calls.push(input); return { text: 'fixture' }; } });
+  try {
+    for (const image of [imageFixture(), imageFixture(jpegFixture(2, 3), 'image/jpeg', 2, 3),
+      imageFixture(webpFixture('VP8L', 5, 7), 'image/webp', 5, 7), imageFixture(webpFixture('VP8 ', 9, 11), 'image/webp', 9, 11)]) {
+      const response = await request(bridge, { route: '/chat', body: { ...chatFixture, images: [image] } });
+      assert.equal(response.status, 200);
+      assert.deepEqual(calls.at(-1).images, [image]);
+    }
+    const four = Array.from({ length: 4 }, (_, i) => imageFixture(pngFixture, 'image/png', 1, 1, `image_${i + 1}`));
+    assert.equal((await request(bridge, { route: '/chat', body: { ...chatFixture, images: four } })).status, 200);
+    await request(bridge, { route: '/chat', body: chatFixture });
+    assert.equal(Object.hasOwn(calls.at(-1), 'images'), false);
+  } finally { await bridge.close(); }
+});
+
+test('all malformed image descriptors fail before operation, discovery or inspector activity', async () => {
+  let touched = 0;
+  const bridge = await createTraeBridge({ runOperation: async () => { touched++; return {}; },
+    discover: () => { touched++; }, owners: () => { touched++; }, fetch: () => { touched++; } });
+  const valid = imageFixture();
+  const badBase64 = [valid.data.slice(0, -1), valid.data + '\n', 'data:image/png;base64,' + valid.data,
+    valid.data.replace(/.$/, '-'), 'Zh==', 'Zg=', 'Zg===', 'Zg==AAAA', ''];
+  try {
+    const invalid = [null, {}, [], [null], [valid, valid],
+      Array.from({ length: 5 }, (_, i) => ({ ...valid, id: `image_${i + 1}` })),
+      ...badBase64.map(data => [{ ...valid, data }]),
+      ...[{ id: 'image_0' }, { mediaType: 'image/gif' }, { mediaType: 'image/jpeg' },
+        { width: 2 }, { width: 0 }, { height: 16385 }, { width: 1.5 }, { height: '1' },
+        { width: 10000, height: 4001 }, { url: 'https://private.invalid' }, { private: 'secret' }].map(change => [{ ...valid, ...change }]),
+      [Object.fromEntries(Object.entries(valid).filter(([key]) => key !== 'data'))],
+      [imageFixture(Buffer.from('not a PNG'))], [imageFixture(pngFixture.subarray(0, -1))],
+      [imageFixture(jpegFixture().subarray(0, -2), 'image/jpeg')],
+      [imageFixture(webpFixture().subarray(0, -1), 'image/webp')]];
+    for (const images of invalid) {
+      const response = await request(bridge, { route: '/chat', body: { ...chatFixture, images } });
+      assert.equal(response.status, 400);
+      assert.equal(response.body.error.code, 'BAD_REQUEST');
+      assert.doesNotMatch(JSON.stringify(response.body), /private\.invalid|secret|base64/);
+    }
+    assert.equal((await request(bridge, { body: { ...account, images: [valid] } })).status, 400);
+    assert.equal(touched, 0);
+  } finally { await bridge.close(); }
+});
+
+test('image byte and body limits are independent, route-scoped and preserve response ceiling', async () => {
+  let calls = 0;
+  let oversizedResult = false;
+  const bridge = await createTraeBridge({ runOperation: async () => {
+    calls++; return oversizedResult ? { text: 'x'.repeat(1024 * 1024) } : { text: 'fixture' };
+  } });
+  const unit = 1024 * 1024;
+  try {
+    const exact = imageFixture(pngSized(4 * unit));
+    assert.equal((await request(bridge, { route: '/chat', body: { ...chatFixture, images: [exact] } })).status, 200);
+    assert.equal((await request(bridge, { route: '/chat', body: { ...chatFixture, images: [exact, { ...exact, id: 'image_2' }] } })).status, 200);
+    for (const images of [[imageFixture(pngSized(4 * unit + 1))],
+      Array.from({ length: 3 }, (_, i) => imageFixture(pngSized(3 * unit), 'image/png', 1, 1, `image_${i + 1}`))]) {
+      assert.equal((await request(bridge, { route: '/chat', body: { ...chatFixture, images } })).status, 400);
+    }
+    assert.equal(calls, 2);
+    assert.equal((await request(bridge, { route: '/catalog', raw: ' '.repeat(unit + 1) })).status, 413);
+    assert.equal((await request(bridge, { route: '/chat', raw: 'x', headers: { 'Content-Length': String(16 * unit + 1) } })).status, 413);
+    assert.equal((await request(bridge, { route: '/chat', raw: ' '.repeat(16 * unit + 1), headers: { 'Transfer-Encoding': 'chunked' } })).status, 413);
+    assert.equal(calls, 2);
+    oversizedResult = true;
+    assert.equal((await request(bridge, { route: '/chat', body: chatFixture })).body.error.code, 'NATIVE_FAILED');
+  } finally { await bridge.close(); }
+});
+
+test('declared image dimensions and WebP canvas are bounded and agree with actual headers', async () => {
+  let calls = 0;
+  const bridge = await createTraeBridge({ runOperation: async () => { calls++; return {}; } });
+  try {
+    for (const [width, height, accepted] of [[16384, 1, true], [8000, 5000, true], [8000, 5001, false], [16385, 1, false]]) {
+      const bytes = Buffer.from(pngFixture);
+      bytes.writeUInt32BE(width, 16); bytes.writeUInt32BE(height, 20);
+      assert.equal((await request(bridge, { route: '/chat', body: {
+        ...chatFixture, images: [imageFixture(bytes, 'image/png', width, height)]
+      } })).status, accepted ? 200 : 400);
+    }
+    const simple = webpFixture('VP8L', 5, 7);
+    const canvasChunk = Buffer.alloc(18);
+    canvasChunk.write('VP8X', 0); canvasChunk.writeUInt32LE(10, 4);
+    canvasChunk.writeUIntLE(4, 12, 3); canvasChunk.writeUIntLE(6, 15, 3);
+    const extended = Buffer.concat([simple.subarray(0, 12), canvasChunk, simple.subarray(12)]);
+    extended.writeUInt32LE(extended.length - 8, 4);
+    assert.equal((await request(bridge, { route: '/chat', body: { ...chatFixture, images: [imageFixture(extended, 'image/webp', 5, 7)] } })).status, 200);
+    extended.writeUIntLE(5, 24, 3);
+    assert.equal((await request(bridge, { route: '/chat', body: { ...chatFixture, images: [imageFixture(extended, 'image/webp', 6, 7)] } })).status, 400);
+    assert.equal(calls, 3);
+  } finally { await bridge.close(); }
+});
+
+test('catalog keeps strict boolean supports_vision declarations only', async () => {
+  let capability = true;
+  const bridge = await createTraeBridge({ runOperation: async () => ({ models: [{ id: 'fixture', supports_vision: capability }] }) });
+  try {
+    for (const value of [true, false]) {
+      capability = value;
+      assert.equal((await request(bridge)).body.models[0].supports_vision, value);
+    }
+    for (const value of ['true', 1, {}, null]) {
+      capability = value;
+      const response = await request(bridge);
+      assert.equal(response.status, 502);
+      assert.equal(response.body.error.code, 'INVALID_NATIVE_RESPONSE');
+    }
+  } finally { await bridge.close(); }
+});
+
+test('official discovery selects the sole same-EXE root rather than untyped descendants', () => {
+  const expected = 'C:\\fixture\\Programs\\Trae CN\\Trae CN.exe';
+  const row = (ProcessId, ParentProcessId, HasType = false) => ({ ProcessId, ParentProcessId, HasType, ExecutablePath: expected });
+  assert.deepEqual(selectOfficialTraeRoot([row(48356, 11332), row(10544, 48356, true), row(53784, 10544)], expected), { pid: 48356 });
+  assert.deepEqual(selectOfficialTraeRoot([row(1, 100)], expected.toLowerCase()), { pid: 1 });
+  for (const rows of [[], [row(1, 100), row(2, 200)], [row(1, 1)], [row(1, 2), row(2, 1)],
+    [row(1, 100, true)], [row(1, 100), row(1, 100)], [{ ...row(1, 100), HasType: 'false' }],
+    [{ ...row(1, 100), ParentProcessId: null }], [{ ...row(1, 100), ExecutablePath: expected + '.evil' }]]) {
+    assert.throws(() => selectOfficialTraeRoot(rows, expected), error => error.code === 'TRAE_NOT_RUNNING');
+  }
 });
