@@ -15,6 +15,12 @@ process.chdir(root);
 const metadata = JSON.parse(await readFile('package.json', 'utf8'));
 const repository = metadata.updateRepository;
 const tag = `v${metadata.version}`;
+const changelog = await readFile(join(root, 'CHANGELOG.md'), 'utf8');
+const section = changelog.split(/^## /m).slice(1).find((entry) =>
+  entry.startsWith(`${metadata.version}（`) || entry.startsWith(`${metadata.version}\n`) || entry.startsWith(`${metadata.version}\r\n`));
+if (!section) throw new Error('The version must have a CHANGELOG entry before publishing');
+const changes = section.slice(section.indexOf('\n') + 1).trim();
+const releaseBody = `## 超级反代 ${tag}\n\n${changes}\n\n### 桌面安装与更新\n\n- 版本化 Windows x64 便携桌面包，解压后运行 WorkBuddy Gateway.exe。\n- 桌面菜单“软件 → 检查桌面更新”从此私人仓库检查版本，需要本机 GitHub 授权。\n- 更新包使用 SHA-256 校验；账号数据与 GitHub 凭据不包含在附件中。\n- 首次从无更新功能的旧版升级时，请先安装本版并保留 data 目录。\n- 后续更新由用户确认后安装，保留账号和设置；上一版程序保留用于回滚。`;
 const out = join(root, 'release', `publish-${tag}`);
 const manifest = JSON.parse(await readFile(join(out, 'update-manifest.json'), 'utf8'));
 if (manifest.version !== metadata.version || manifest.repository !== repository ||
@@ -25,22 +31,29 @@ const head = git('rev-parse', 'HEAD');
 if (manifest.commit !== head) throw new Error('The release was built from a different source commit; rebuild before publishing');
 if (git('rev-parse', `${tag}^{}`) !== head) throw new Error('The version tag must identify the current commit');
 if (git('remote', 'get-url', 'origin') !== `https://github.com/${repository}.git`) throw new Error('Origin must be the configured private repository');
-const remoteRefs = git('ls-remote', 'origin', `refs/tags/${tag}`, `refs/tags/${tag}^{}`).split('\n');
-if (!remoteRefs.some((line) => line.startsWith(head + '\t'))) throw new Error('Push the matching version tag before publishing');
+const token = loadToken(repository);
+const repo = await apiJSON(repository, '', token);
+if (repo.private !== true || !repo.permissions?.push) throw new Error('Publishing requires your private repository with write permission');
+// 复用已授权的官方 API 核验远端标签，不依赖另一条 github.com Git 传输链路。
+let remoteTag = (await apiJSON(repository, `/git/ref/tags/${encodeURIComponent(tag)}`, token)).object;
+for (let depth = 0; remoteTag.type === 'tag' && depth < 4; depth++) {
+  remoteTag = (await apiJSON(repository, `/git/tags/${remoteTag.sha}`, token)).object;
+}
+if (remoteTag.type !== 'commit' || remoteTag.sha !== head) throw new Error('Push the matching version tag before publishing');
 const archivePath = join(out, manifest.asset);
 const hash = createHash('sha256');
 for await (const chunk of createReadStream(archivePath)) hash.update(chunk);
 if (hash.digest('hex') !== manifest.sha256 || (await stat(archivePath)).size !== manifest.size) throw new Error('Release archive changed after preparation');
-const token = loadToken(repository);
-const repo = await apiJSON(repository, '', token);
-if (repo.private !== true || !repo.permissions?.push) throw new Error('Publishing requires your private repository with write permission');
 const releases = await apiJSON(repository, '/releases?per_page=100', token);
 let release = releases.find((entry) => entry.tag_name === tag);
 if (release && !release.draft) throw new Error('This version is already published; use a new version instead of overwriting it');
 if (!release) release = await apiJSON(repository, '/releases', token, { method: 'POST', body: {
   tag_name: tag, target_commitish: head, name: `超级反代 ${tag}`, draft: true, prerelease: false,
-  body: `## 超级反代 ${tag}\n\n- 版本化 Windows x64 便携桌面包。\n- 桌面菜单“软件 → 检查桌面更新”从此私人仓库检查版本。\n- 更新包使用 SHA-256 校验；账号数据不包含在附件中。\n- 首次从无更新功能的旧版升级时，请先安装本版并保留 data 目录。\n\n后续更新由用户确认后安装；上一版程序保留用于回滚。`
+  body: releaseBody
 } });
+if (release.body !== releaseBody) release = await apiJSON(repository, `/releases/${release.id}`, token, {
+  method: 'PATCH', body: { body: releaseBody }
+});
 for (const name of [manifest.asset, 'update-manifest.json', 'SHA256SUMS']) {
   const file = join(out, name);
   const size = (await stat(file)).size;
