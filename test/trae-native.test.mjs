@@ -585,6 +585,8 @@ test('official discovery selects the sole same-EXE root rather than untyped desc
   const row = (ProcessId, ParentProcessId, HasType = false) => ({ ProcessId, ParentProcessId, HasType, ExecutablePath: expected });
   assert.deepEqual(selectOfficialTraeRoot([row(48356, 11332), row(10544, 48356, true), row(53784, 10544)], expected), { pid: 48356 });
   assert.deepEqual(selectOfficialTraeRoot([row(1, 100)], expected.toLowerCase()), { pid: 1 });
+  const programFiles = 'C:\\Program Files\\Trae CN\\Trae CN.exe';
+  assert.deepEqual(selectOfficialTraeRoot([{ ProcessId: 2, ParentProcessId: 100, HasType: false, ExecutablePath: programFiles }], [expected, programFiles]), { pid: 2 });
   for (const rows of [[], [row(1, 100), row(2, 200)], [row(1, 1)], [row(1, 2), row(2, 1)],
     [row(1, 100, true)], [row(1, 100), row(1, 100)], [{ ...row(1, 100), HasType: 'false' }],
     [{ ...row(1, 100), ParentProcessId: null }], [{ ...row(1, 100), ExecutablePath: expected + '.evil' }]]) {

@@ -531,15 +531,24 @@ class TraeProvider:
 
     @staticmethod
     def _client():
-        roots = [Path(os.environ.get("LOCALAPPDATA", "")) / "Programs/Trae CN/resources/app"]
+        roots = []
+        for base in (os.environ.get("LOCALAPPDATA"), os.environ.get("ProgramW6432"),
+                     os.environ.get("ProgramFiles"), os.environ.get("ProgramFiles(x86)")):
+            if not isinstance(base, str) or not base:
+                continue
+            for candidate in (Path(base) / "Programs/Trae CN/resources/app",
+                              Path(base) / "Trae CN/resources/app"):
+                if candidate not in roots:
+                    roots.append(candidate)
         for root in roots:
             try:
                 product = json.loads((root / "product.json").read_text(encoding="utf-8"))
                 version = product.get("appVersion")
-                return {"installed": True, "version": version if isinstance(version, str) else None}
+                return {"installed": True, "version": version if isinstance(version, str) else None,
+                        "path": str(root.parent.parent)}
             except (OSError, ValueError, AttributeError, RecursionError):
                 pass
-        return {"installed": False, "version": None}
+        return {"installed": False, "version": None, "path": None}
 
     def status(self):
         with self._lock:

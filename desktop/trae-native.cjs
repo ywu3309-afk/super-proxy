@@ -75,13 +75,29 @@ function powershell(script) {
     }));
 }
 
+function traeExecutableCandidates(env = process.env) {
+  const roots = [
+    env.LOCALAPPDATA,
+    env.ProgramW6432,
+    env.ProgramFiles,
+    env['ProgramFiles(x86)']
+  ].filter((value, index, values) => typeof value === 'string' && value && values.indexOf(value) === index);
+  const candidates = [];
+  for (const root of roots) {
+    candidates.push(path.join(root, 'Programs', 'Trae CN', 'Trae CN.exe'));
+    candidates.push(path.join(root, 'Trae CN', 'Trae CN.exe'));
+  }
+  return [...new Set(candidates)];
+}
+
 async function discoverTrae() {
-  if (process.platform !== 'win32' || !process.env.LOCALAPPDATA) throw failure('TRAE_NOT_RUNNING');
-  const expected = path.join(process.env.LOCALAPPDATA, 'Programs', 'Trae CN', 'Trae CN.exe');
-  const escaped = expected.replace(/'/g, "''");
+  if (process.platform !== 'win32') throw failure('TRAE_NOT_RUNNING');
+  const expected = traeExecutableCandidates();
+  if (!expected.length) throw failure('TRAE_NOT_RUNNING');
+  const escaped = expected.map((value) => `'${value.replace(/'/g, "''")}'`).join(',');
   const rows = await powershell(`$ErrorActionPreference='Stop'; @(
     Get-CimInstance Win32_Process | Where-Object {
-      $_.ExecutablePath -ieq '${escaped}'
+      $_.ExecutablePath -and @(${escaped}) -icontains $_.ExecutablePath
     } | Select-Object ProcessId, ParentProcessId, ExecutablePath,
       @{Name='HasType';Expression={ [bool]($_.CommandLine -match '--type=') }}
   ) | ConvertTo-Json -Compress`);
@@ -90,12 +106,15 @@ async function discoverTrae() {
 }
 
 function selectOfficialTraeRoot(rows, expected) {
-  if (!Array.isArray(rows) || !rows.length || typeof expected !== 'string') throw failure('TRAE_NOT_RUNNING');
+  const allowed = (Array.isArray(expected) ? expected : [expected])
+    .filter((value) => typeof value === 'string' && value)
+    .map((value) => value.toLowerCase());
+  if (!Array.isArray(rows) || !rows.length || !allowed.length) throw failure('TRAE_NOT_RUNNING');
   const byId = new Map();
   for (const row of rows) {
     if (!row || !Number.isSafeInteger(row.ProcessId) || row.ProcessId < 1 ||
         !Number.isSafeInteger(row.ParentProcessId) || row.ParentProcessId < 0 ||
-        typeof row.ExecutablePath !== 'string' || row.ExecutablePath.toLowerCase() !== expected.toLowerCase() ||
+        typeof row.ExecutablePath !== 'string' || !allowed.includes(row.ExecutablePath.toLowerCase()) ||
         typeof row.HasType !== 'boolean' || byId.has(row.ProcessId)) throw failure('TRAE_NOT_RUNNING');
     byId.set(row.ProcessId, row);
   }
