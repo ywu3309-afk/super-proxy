@@ -132,6 +132,86 @@ def _compact_tool_history(messages, fits):
     return compacted
 
 
+_PROMPT_SCHEMA_DROP_KEYS = {
+    "description", "title", "default", "examples", "$schema"
+}
+_PROMPT_SCHEMA_KEEP_KEYS = {
+    "type", "properties", "required", "items", "enum", "const",
+    "additionalProperties", "anyOf", "allOf", "oneOf", "minimum",
+    "maximum", "exclusiveMinimum", "exclusiveMaximum", "minLength",
+    "maxLength", "minItems", "maxItems", "minProperties", "maxProperties",
+    "pattern"
+}
+_PROMPT_SCHEMA_STRICT_KEYS = {
+    "type", "properties", "required", "items", "enum", "const",
+    "additionalProperties", "anyOf", "allOf", "oneOf"
+}
+
+
+def _compact_prompt_schema(value, *, strict=False, depth=0):
+    """Keep the schema shape the model needs while removing prose metadata.
+
+    Validation still uses the original, fully checked schema in ``schemas``.
+    This copy is only the data document shown to TRAE, where verbose tool
+    descriptions are a common cause of the native 65,536 UTF-16 limit.
+    """
+    if depth > MAX_DEPTH:
+        return {"type": "object"}
+    if isinstance(value, dict):
+        result = {}
+        for key, child in value.items():
+            if key in _PROMPT_SCHEMA_DROP_KEYS or key not in _PROMPT_SCHEMA_KEEP_KEYS:
+                continue
+            if strict and key not in _PROMPT_SCHEMA_STRICT_KEYS:
+                continue
+            if key == "properties" and isinstance(child, dict):
+                result[key] = {
+                    name: _compact_prompt_schema(schema, strict=strict, depth=depth + 1)
+                    for name, schema in child.items()
+                }
+                continue
+            if key == "pattern" and isinstance(child, str) and len(child) > 160:
+                if strict:
+                    continue
+                child = child[:160]
+            result[key] = _compact_prompt_schema(child, strict=strict, depth=depth + 1)
+        if not result:
+            result["type"] = value.get("type", "object")
+        return result
+    if isinstance(value, list):
+        return [_compact_prompt_schema(item, strict=strict, depth=depth + 1) for item in value]
+    return value
+
+
+def _compact_prompt_tools(tools, *, choice, forced, level):
+    """Create progressively smaller tool definitions for the native prompt.
+
+    The original definitions remain in the request snapshot and are used for
+    strict result validation.  Only the model-facing data document is reduced.
+    """
+    if choice == "none":
+        return []
+    selected = tools
+    if choice == "forced" and forced:
+        selected = [tool for tool in tools
+                    if isinstance(tool, dict)
+                    and isinstance(tool.get("function"), dict)
+                    and tool["function"].get("name") == forced]
+    result = []
+    for tool in selected:
+        fn = tool["function"]
+        item = {"type": "function", "function": {"name": fn["name"]}}
+        description = fn.get("description")
+        if level == 1 and isinstance(description, str) and description:
+            item["function"]["description"] = description[:480]
+        parameters = fn.get("parameters", {"type": "object", "properties": {}})
+        item["function"]["parameters"] = _compact_prompt_schema(
+            parameters, strict=level >= 2
+        )
+        result.append(item)
+    return result
+
+
 def _reject_constant(_value):
     raise ValueError("non-finite JSON constant")
 
@@ -610,17 +690,43 @@ def prepare(payload):
                         "Use the actual image content when answering the corresponding user message.")
     budget = min(MAX_PROMPT_UTF16, PROMPT_BUDGET_UTF16)
 
-    def make_data(candidate):
-        return _json({"tools": tools, "messages": candidate, "tool_choice": choice,
-                      "forced_name": forced, "parallel_tool_calls": parallel})
+    # Keep the exact client definitions for validation, but allow the model-
+    # facing data document to fall back to a compact schema when a large DSH
+    # permission set would otherwise exceed TRAE's native context window.
+    full_definition_size = _utf16_length(_json(tools))
+    compact_needed = (choice == "none" or choice == "forced" or len(tools) > 4
+                      or full_definition_size > 8192)
+    definition_variants = [[]] if choice == "none" else [tools]
+    if compact_needed and choice != "none":
+        definition_variants.extend([
+            _compact_prompt_tools(tools, choice=choice, forced=forced, level=1),
+            _compact_prompt_tools(tools, choice=choice, forced=forced, level=2),
+            _compact_prompt_tools(tools, choice=choice, forced=forced, level=3),
+        ])
 
-    def fits(candidate):
-        return _utf16_length(instruction + make_data(candidate) + reminder) <= budget
+    data = None
+    for prompt_tools in definition_variants:
+        def make_data(candidate, definitions=prompt_tools):
+            return _json({"tools": definitions, "messages": candidate, "tool_choice": choice,
+                          "forced_name": forced, "parallel_tool_calls": parallel})
 
-    if not fits(messages):
-        messages = _compact_tool_history(messages, fits)
-    data = make_data(messages)
-    if _utf16_length(instruction + data + reminder) > budget:
+        def fits(candidate):
+            return _utf16_length(instruction + make_data(candidate) + reminder) <= budget
+
+        candidate_messages = messages
+        if not fits(candidate_messages):
+            try:
+                candidate_messages = _compact_tool_history(candidate_messages, fits)
+            except ToolBridgeError as error:
+                if error.code != "request_too_large":
+                    raise
+                continue
+        candidate_data = make_data(candidate_messages)
+        if _utf16_length(instruction + candidate_data + reminder) <= budget:
+            data = candidate_data
+            break
+
+    if data is None:
         _error("工具定义或当前消息本身超过 TRAE 原生上下文限制。", "request_too_large", 413)
     converted = [{"role": "system", "content": [{"type": "text", "text": instruction}]},
                  {"role": "user", "content": [{"type": "text", "text": data}]},

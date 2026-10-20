@@ -181,6 +181,8 @@ th.sortable:focus-visible .sort-arrow.idle{opacity:1}
 .bar-fill.think{background:var(--think)}
 .table-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch;width:100%;border-radius:8px}
 .table-wrap table{min-width:720px}
+#pageAnalytics #recent table{min-width:1480px}
+#pageAnalytics #modelsTable{min-width:1180px}
 #recent table th, #recent table td{text-align:center}
 #recent table th:first-child, #recent table td:first-child{text-align:center}
 #recent table td.mono{font-variant-numeric:tabular-nums}
@@ -870,7 +872,8 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
 #pageAnalytics .iconbtn:hover{border-color:var(--line2);box-shadow:var(--shadow)}
 
 
-#pageAnalytics .wrap{max-width:1320px;margin:0 auto;padding:14px 20px 40px}
+#pageAnalytics{--analytics-zoom:.9}
+#pageAnalytics .wrap{max-width:calc(1320px / var(--analytics-zoom));width:calc(100% / var(--analytics-zoom));margin:0 auto;padding:14px 20px 40px;zoom:var(--analytics-zoom)}
 #pageAnalytics .pagehead{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:12px}
 #pageAnalytics h1.pagetitle{
   margin:0;font-family:var(--serif);font-size:19px;font-weight:600;letter-spacing:.01em;
@@ -890,6 +893,14 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
 }
 #pageAnalytics .seg button:hover{color:var(--fg)}
 #pageAnalytics .seg button.on{background:var(--panel);color:var(--fg);font-weight:600;box-shadow:var(--shadow);border:1px solid var(--line)}
+#pageAnalytics .analytics-head-tools{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap}
+#pageAnalytics .analytics-zoom{display:inline-flex;align-items:center;gap:3px;min-height:32px;padding:2px 4px;background:var(--panel2);border:1px solid var(--line);border-radius:10px}
+#pageAnalytics .analytics-zoom-label{padding:0 6px;color:var(--dim);font-size:11px;white-space:nowrap}
+#pageAnalytics .analytics-zoom-btn,#pageAnalytics .analytics-zoom-value{min-width:30px;min-height:27px;padding:3px 8px;border:1px solid transparent;border-radius:7px;background:transparent;color:var(--dim);box-shadow:none;font-size:12px;font-weight:600;line-height:1}
+#pageAnalytics .analytics-zoom-btn:hover,#pageAnalytics .analytics-zoom-value:hover{background:var(--panel);border-color:var(--line);color:var(--fg)}
+#pageAnalytics .analytics-zoom-value{min-width:48px;color:var(--fg);font-variant-numeric:tabular-nums}
+#pageAnalytics .analytics-zoom-btn:disabled{opacity:.35;cursor:not-allowed}
+@media (max-width:860px){#pageAnalytics .analytics-head-tools{width:100%;justify-content:space-between}#pageAnalytics .analytics-zoom-label{padding-left:4px}}
 
 
 #pageAnalytics .kpis{display:grid;grid-template-columns:repeat(6, 1fr);gap:8px;margin-bottom:10px}
@@ -2001,9 +2012,10 @@ html[data-theme-style="cyber"] .dot{animation:cyberPulse 2.4s ease-in-out infini
     '国内版 (China)': 'China',
     '国内版 (China) · copilot.tencent.com': 'China · copilot.tencent.com',
     '国内版成长任务与日常福利': 'China growth tasks and daily perks',
-    '国内版任务与福利': 'China tasks and perks',
-    // 页签名与区块标题：词级词典缺了「福利」，整体只能拼出「Taskand福利」。
-    '任务与福利': 'Tasks & rewards',
+    '国内版任务与福利': 'China automated tasks',
+    '国内版自动化任务': 'China automated tasks',
+    '任务与福利': 'Automated tasks',
+    '自动化任务': 'Automated tasks',
     '国际版每日活跃福利': 'Daily activity rewards (Global)',
     '已获取福利总积分': 'Total reward credits earned',
     '每日活跃打卡、Buddy 加油站、成长任务与福利积分总览。': 'Daily check-in, Buddy refuel and an overview of growth tasks plus reward credits.',
@@ -3185,7 +3197,7 @@ html[data-theme-style="cyber"] .dot{animation:cyberPulse 2.4s ease-in-out infini
         TRAE
       </button>
       <button class="main-nav-btn" id="btnNavTasks" onclick="switchMainTab('tasks')">
-        任务与福利
+        自动化任务
       </button>
       <button class="main-nav-btn" id="btnNavAnalytics" onclick="switchMainTab('analytics')">
         数据看板
@@ -3291,7 +3303,7 @@ html[data-theme-style="cyber"] .dot{animation:cyberPulse 2.4s ease-in-out infini
   <!-- 页面头部：标题 + 一行说明，与其它页面的头部结构保持一致 -->
   <div style="margin-bottom:16px">
     <h2 id="gatewayPageTitle" style="margin:0;font-size:17px;color:var(--fg);font-family:var(--serif);font-weight:600;letter-spacing:.02em">网关与账号</h2>
-    <div id="gatewayPageDesc" style="font-size:12px;color:var(--dim);margin-top:4px">管理账号池与代理出口，查看当日调用量、估算花费、成功率、最近请求与网关模型清单。</div>
+    <div id="gatewayPageDesc" style="font-size:12px;color:var(--dim);margin-top:4px">管理账号池与代理出口，查看当前出口和后台调度状态；详细请求记录、模型清单与用量分析请前往“数据看板”。</div>
   </div>
   <!-- 版本中枢控制栏：国内版 / 国际版分区展示，默认出口单独放在下方。 -->
   <div class="realm-overview-label" style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin:0 0 8px;flex-wrap:wrap">
@@ -3373,68 +3385,6 @@ html[data-theme-style="cyber"] .dot{animation:cyberPulse 2.4s ease-in-out infini
   <!-- 合并模式（设置里「账号独立成一个页签」关闭，默认）时，账号页的三个区块搬到
        这里，位置与拆分前一致：控制栏之后、最近请求之前。拆分模式下这里是空的。 -->
   <span id="accountsSectionsAnchor" hidden></span>
-
-  <!-- 融合后的：模型性能与用量矩阵 -->
-  
-
-  <section>
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
-      <h2 style="margin:0">最近请求<em id="recentRealmTag" style="color:var(--dim);font-weight:500"></em><em id="recentCount"></em></h2>
-      <div style="display:inline-flex;align-items:center;gap:8px">
-        <span style="font-size:12px;color:var(--dim)">显示条数:</span>
-        <div style="display:inline-flex;gap:3px;background:var(--panel2);padding:3px;border-radius:8px;border:1px solid var(--line)">
-          <button class="range-btn" id="btnRecentLimit10" onclick="setRecentLimit(10)">10</button>
-          <button class="range-btn" id="btnRecentLimit20" onclick="setRecentLimit(20)">20</button>
-          <button class="range-btn" id="btnRecentLimit50" onclick="setRecentLimit(50)">50</button>
-          <button class="range-btn" id="btnRecentLimit100" onclick="setRecentLimit(100)">100</button>
-        </div>
-      </div>
-    </div>
-    <div id="recent" class="table-wrap"></div>
-    <div id="recentPagination" style="display:flex;align-items:center;justify-content:space-between;margin-top:14px;padding-top:12px;border-top:1px solid var(--line);font-size:12px;color:var(--dim);flex-wrap:wrap;gap:8px">
-      <div id="recentPageInfo">第 1 / 1 页 · 共 0 条记录</div>
-      <div style="display:inline-flex;gap:5px;align-items:center">
-        <button class="sec mini" id="btnRecentPrev" onclick="changeRecentPage(-1)">上一页</button>
-        <div id="recentPageButtons" style="display:inline-flex;gap:3px;align-items:center"></div>
-        <button class="sec mini" id="btnRecentNext" onclick="changeRecentPage(1)">下一页</button>
-      </div>
-    </div>
-  </section>
-
-  <!-- 版本模型库与能力清单 -->
-  <section>
-    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:10px">
-      <h2 style="margin:0">网关模型清单<em id="modelsRealmTag" style="color:var(--dim);font-weight:500"></em><em id="availModelCount"></em></h2>
-      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-        <div style="font-size:12px;color:var(--dim)">展示当前视图下官方对话大模型、上下文容量、推理/视觉能力、思考控制、默认采样参数及在售倍率</div>
-        <!-- 手动刷新：强制走一次上游 /v3/config（只在当前视图的版本上，用该
-             版本的账号），成功后本表立即重载。服务端同一版本 30s 冷却。 -->
-        <button class="sec mini" id="btnRefreshModels" onclick="refreshModelCatalog(this)"
-                title="立即从上游 API 重新拉取当前视图版本的模型清单（不走缓存；同一版本 30 秒内只能刷一次）">刷新模型清单</button>
-      </div>
-    </div>
-    <!-- 清单来源横幅：API 获取 → 绿色状态条（附刷新时间）；非 API（项目默认
-         信息/缓存文件）→ 黄色警示「模型、倍率数据可能不一致」。内容由
-         /v1/models 的 catalog 字段驱动，见 renderModelsSourceLine。 -->
-    <div id="modelsSourceLine" style="font-size:12px;color:var(--dim);margin:0 0 12px;min-height:16px"></div>
-    <div style="overflow-x:auto">
-      <table id="modelsTable" class="data-cards">
-        <thead>
-          <tr>
-            <th style="text-align:left;width:17%">模型 ID</th>
-            <th style="text-align:left;width:11%">名称</th>
-            <th style="text-align:center;width:12%">消费倍率 / 优惠</th>
-            <th style="text-align:center;width:14%">模型能力</th>
-            <th style="text-align:center;width:9%">上下文窗口</th>
-            <th style="text-align:center;width:9%">最大输出</th>
-            <th style="text-align:left;width:16%">思考档位</th>
-            <th style="text-align:left;width:12%;white-space:nowrap">默认采样参数</th>
-          </tr>
-        </thead>
-        <tbody></tbody>
-      </table>
-    </div>
-  </section>
 
   </div><!-- /pageGateway -->
   
@@ -3647,8 +3597,8 @@ html[data-theme-style="cyber"] .dot{animation:cyberPulse 2.4s ease-in-out infini
   <div id="pageTasks" class="main-page">
   <!-- 页面头部：标题 + 一行说明，与其它页面的头部结构保持一致 -->
   <div style="margin-bottom:16px">
-    <h2 style="margin:0;font-size:17px;color:var(--fg);font-family:var(--serif);font-weight:600;letter-spacing:.02em">任务与福利</h2>
-    <div style="font-size:12px;color:var(--dim);margin-top:4px">每日活跃打卡、Buddy 加油站、成长任务与福利积分总览。</div>
+    <h2 style="margin:0;font-size:17px;color:var(--fg);font-family:var(--serif);font-weight:600;letter-spacing:.02em">自动化任务</h2>
+    <div style="font-size:12px;color:var(--dim);margin-top:4px">自动执行每日活跃、签到和成长任务，并汇总积分结果。</div>
   </div>
   <!-- 国际版每日活跃福利 -->
   <section id="sectionIntlTasks" style="margin-bottom:24px">
@@ -3681,8 +3631,8 @@ html[data-theme-style="cyber"] .dot{animation:cyberPulse 2.4s ease-in-out infini
   <section id="sectionGrowthTasks">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
       <div>
-        <h2 style="margin:0">国内版任务与福利</h2>
-        <div style="font-size:12px;color:var(--dim)">全自动批量接取、事件上报点亮并领取官方成长积分 (+1450分)，以及猫猫日常与打卡</div>
+        <h2 style="margin:0">国内版自动化任务</h2>
+        <div style="font-size:12px;color:var(--dim)">全自动批量接取、事件上报、领取官方成长积分，以及猫猫日常与打卡。</div>
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
         <select id="growthAcctSelect" onchange="switchGrowthAccount(this.value)" style="background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:6px 10px;font-size:12px;color:var(--fg);font-family:inherit">
@@ -3756,13 +3706,21 @@ html[data-theme-style="cyber"] .dot{animation:cyberPulse 2.4s ease-in-out infini
 <!-- ====================== 页头 + 范围 ====================== -->
   <div class="pagehead">
     <h1 class="pagetitle">数据看板 <span class="pagesub" id="pageSub">—</span></h1>
-    <div class="seg" id="rangeSeg">
-      <button data-range="today" class="on">今日</button>
-      <button data-range="d3">近 3 日</button>
-      <button data-range="week">本周</button>
-      <button data-range="month">本月</button>
-      <button data-range="d30">近 30 天</button>
-      <button data-range="all">全部</button>
+    <div class="analytics-head-tools">
+      <div class="seg" id="rangeSeg">
+        <button data-range="today" class="on">今日</button>
+        <button data-range="d3">近 3 日</button>
+        <button data-range="week">本周</button>
+        <button data-range="month">本月</button>
+        <button data-range="d30">近 30 天</button>
+        <button data-range="all">全部</button>
+      </div>
+      <div class="analytics-zoom" id="analyticsZoom" role="group" aria-label="数据看板缩放">
+        <span class="analytics-zoom-label">看板缩放</span>
+        <button type="button" class="analytics-zoom-btn" id="analyticsZoomDown" onclick="stepAnalyticsZoom(-0.05)" aria-label="缩小数据看板" title="缩小数据看板">−</button>
+        <button type="button" class="analytics-zoom-value" id="analyticsZoomValue" onclick="resetAnalyticsZoom()" aria-label="恢复默认看板缩放" title="点击恢复默认缩放" aria-valuemin="80" aria-valuemax="120" aria-valuenow="90">90%</button>
+        <button type="button" class="analytics-zoom-btn" id="analyticsZoomUp" onclick="stepAnalyticsZoom(0.05)" aria-label="放大数据看板" title="放大数据看板">+</button>
+      </div>
     </div>
   </div>
 
@@ -3832,8 +3790,8 @@ html[data-theme-style="cyber"] .dot{animation:cyberPulse 2.4s ease-in-out infini
 
     <section class="panel">
       <div class="phead">
-        <h2>最近请求</h2>
-        <span class="hint">实时活动流</span>
+        <h2>实时活动流</h2>
+        <span class="hint">最近调用摘要</span>
         <div class="spacer"></div>
         <span class="hm-meta" id="recentMeta">—</span>
       </div>
@@ -3893,7 +3851,71 @@ html[data-theme-style="cyber"] .dot{animation:cyberPulse 2.4s ease-in-out infini
     </div>
   </section>
 
-  <!-- ====================== ⑤ 折叠区 ====================== -->
+  <!-- ====================== ⑤ 网关明细（从“网关”主页集中到数据看板） ====================== -->
+  <section class="panel gateway-detail-panel" id="gatewayRecentPanel">
+    <div class="phead">
+      <h2>最近请求<em id="recentRealmTag" style="color:var(--dim);font-weight:500"></em><em id="recentCount"></em></h2>
+      <span class="hint">完整调用明细 · 当前视图</span>
+      <div class="spacer"></div>
+      <div style="display:inline-flex;align-items:center;gap:8px">
+        <span style="font-size:11px;color:var(--dim)">显示条数</span>
+        <div style="display:inline-flex;gap:3px;background:var(--panel2);padding:3px;border-radius:8px;border:1px solid var(--line)">
+          <button class="range-btn" id="btnRecentLimit10" onclick="setRecentLimit(10)">10</button>
+          <button class="range-btn" id="btnRecentLimit20" onclick="setRecentLimit(20)">20</button>
+          <button class="range-btn" id="btnRecentLimit50" onclick="setRecentLimit(50)">50</button>
+          <button class="range-btn" id="btnRecentLimit100" onclick="setRecentLimit(100)">100</button>
+        </div>
+      </div>
+    </div>
+    <div class="pbody gateway-detail-body">
+      <div id="recent" class="table-wrap"></div>
+      <div id="recentPagination" style="display:flex;align-items:center;justify-content:space-between;margin-top:14px;padding-top:12px;border-top:1px solid var(--line);font-size:12px;color:var(--dim);flex-wrap:wrap;gap:8px">
+        <div id="recentPageInfo">第 1 / 1 页 · 共 0 条记录</div>
+        <div style="display:inline-flex;gap:5px;align-items:center">
+          <button class="sec mini" id="btnRecentPrev" onclick="changeRecentPage(-1)">上一页</button>
+          <div id="recentPageButtons" style="display:inline-flex;gap:3px;align-items:center"></div>
+          <button class="sec mini" id="btnRecentNext" onclick="changeRecentPage(1)">下一页</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel gateway-detail-panel" id="gatewayModelsPanel">
+    <div class="phead">
+      <h2>网关模型清单<em id="modelsRealmTag" style="color:var(--dim);font-weight:500"></em><em id="availModelCount"></em></h2>
+      <span class="hint">当前视图下的模型能力、上下文和采样参数</span>
+      <div class="spacer"></div>
+      <!-- 手动刷新：强制走一次上游 /v3/config（只在当前视图的版本上，用该
+           版本的账号），成功后本表立即重载。服务端同一版本 30s 冷却。 -->
+      <button class="sec mini" id="btnRefreshModels" onclick="refreshModelCatalog(this)"
+              title="立即从上游 API 重新拉取当前视图版本的模型清单（不走缓存；同一版本 30 秒内只能刷一次）">刷新模型清单</button>
+    </div>
+    <div class="pbody gateway-detail-body">
+      <!-- 清单来源横幅：API 获取 → 绿色状态条（附刷新时间）；非 API（项目默认
+           信息/缓存文件）→ 黄色警示「模型、倍率数据可能不一致」。内容由
+           /v1/models 的 catalog 字段驱动，见 renderModelsSourceLine。 -->
+      <div id="modelsSourceLine" style="font-size:12px;color:var(--dim);margin:0 0 12px;min-height:16px"></div>
+      <div style="overflow-x:auto">
+        <table id="modelsTable" class="data-cards">
+          <thead>
+            <tr>
+              <th style="text-align:left;width:17%">模型 ID</th>
+              <th style="text-align:left;width:11%">名称</th>
+              <th style="text-align:center;width:12%">消费倍率 / 优惠</th>
+              <th style="text-align:center;width:14%">模型能力</th>
+              <th style="text-align:center;width:9%">上下文窗口</th>
+              <th style="text-align:center;width:9%">最大输出</th>
+              <th style="text-align:left;width:16%">思考档位</th>
+              <th style="text-align:left;width:12%;white-space:nowrap">默认采样参数</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- ====================== ⑥ 折叠区 ====================== -->
   <div class="folds">
     <details class="fold" id="foldRemainBox">
       <summary><h2>剩余用量估算</h2><span class="chev">▶</span></summary>
@@ -6948,7 +6970,7 @@ async function loadActivityToday(){
   }
 }
 
-// 任务与福利页面的今日打卡/签到卡片状态：与网关与账号页面的今日活跃/今日签到完全同一口径
+// 自动化任务页面的今日打卡/签到卡片状态：与网关与账号页面的今日活跃/今日签到完全同一口径
 // 统一通过 activityStatusOf(a) 判定（以今天真实流水为准，回落到本日本地时间前缀）。
 function updateTaskPageCheckinCards(){
   const allList = window.ACCOUNTS || [];
@@ -9261,7 +9283,54 @@ async function refreshInner(gen){
 document.addEventListener('DOMContentLoaded', function(){
   applySettingsDensity();
   initPageNav(document.querySelector('.main-page.active'));
+  applyAnalyticsZoom(readAnalyticsZoom());
 });
+
+const ANALYTICS_ZOOM_KEY = 'WB_ANALYTICS_ZOOM';
+const ANALYTICS_ZOOM_MIN = 0.8;
+const ANALYTICS_ZOOM_MAX = 1.2;
+const ANALYTICS_ZOOM_DEFAULT = 0.9;
+let ANALYTICS_ZOOM = ANALYTICS_ZOOM_DEFAULT;
+
+function readAnalyticsZoom(){
+  let value = ANALYTICS_ZOOM_DEFAULT;
+  try{
+    const stored = parseFloat(localStorage.getItem(ANALYTICS_ZOOM_KEY) || '');
+    if(Number.isFinite(stored)) value = stored;
+  }catch(e){}
+  return Math.min(ANALYTICS_ZOOM_MAX, Math.max(ANALYTICS_ZOOM_MIN, value));
+}
+
+function applyAnalyticsZoom(value){
+  const page = document.getElementById('pageAnalytics');
+  if(!page) return;
+
+  ANALYTICS_ZOOM = Math.min(
+    ANALYTICS_ZOOM_MAX,
+    Math.max(ANALYTICS_ZOOM_MIN, Math.round(Number(value) * 20) / 20)
+  );
+  page.style.setProperty('--analytics-zoom', String(ANALYTICS_ZOOM));
+
+  const label = document.getElementById('analyticsZoomValue');
+  if(label){
+    label.textContent = Math.round(ANALYTICS_ZOOM * 100) + '%';
+    label.setAttribute('aria-valuenow', String(Math.round(ANALYTICS_ZOOM * 100)));
+  }
+  const down = document.getElementById('analyticsZoomDown');
+  if(down) down.disabled = ANALYTICS_ZOOM <= ANALYTICS_ZOOM_MIN;
+  const up = document.getElementById('analyticsZoomUp');
+  if(up) up.disabled = ANALYTICS_ZOOM >= ANALYTICS_ZOOM_MAX;
+
+  try{ localStorage.setItem(ANALYTICS_ZOOM_KEY, String(ANALYTICS_ZOOM)); }catch(e){}
+}
+
+function stepAnalyticsZoom(delta){
+  applyAnalyticsZoom(ANALYTICS_ZOOM + Number(delta || 0));
+}
+
+function resetAnalyticsZoom(){
+  applyAnalyticsZoom(ANALYTICS_ZOOM_DEFAULT);
+}
 
 let RECENT_LIMIT = parseInt(localStorage.getItem('WB_RECENT_LIMIT') || '20', 10);
 if(![10, 20, 50, 100].includes(RECENT_LIMIT)) RECENT_LIMIT = 20;
@@ -9449,7 +9518,7 @@ async function startDashboard(){
   // 别让国内版那条约 2 秒的成长任务接口把首屏的用量卡片拖在后面。
   await loadSettings();
   await initRealm();
-  // 成长任务那条走上游、约 2 秒，只服务「任务与福利」页，而且它自己渲染。原来
+  // 成长任务那条走上游、约 2 秒，只服务「自动化任务」页，而且它自己渲染。原来
   // 它在这一批 Promise.all 里，switchMainTab 因此被押到它后面——落在数据看板
   // 页签时，KPI 要等这两秒过去才开始发 /usage/analytics。这里只把它摘出来让它
   // 并行跑，其余照旧等待；异常自己收，别变成未处理的拒绝。

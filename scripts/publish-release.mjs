@@ -20,7 +20,7 @@ const section = changelog.split(/^## /m).slice(1).find((entry) =>
   entry.startsWith(`${metadata.version}（`) || entry.startsWith(`${metadata.version}\n`) || entry.startsWith(`${metadata.version}\r\n`));
 if (!section) throw new Error('The version must have a CHANGELOG entry before publishing');
 const changes = section.slice(section.indexOf('\n') + 1).trim();
-const releaseBody = `## 超级反代 ${tag}\n\n${changes}\n\n### 桌面安装与更新\n\n- 版本化 Windows x64 便携桌面包，解压后运行 WorkBuddy Gateway.exe。\n- 桌面菜单“软件 → 检查桌面更新”从此 GitHub Release 检查版本，需要本机 GitHub 授权。\n- 更新包使用 SHA-256 校验；账号数据与 GitHub 凭据不包含在附件中。\n- 首次从无更新功能的旧版升级时，请先安装本版并保留 data 目录。\n- 后续更新由用户确认后安装，保留账号和设置；上一版程序保留用于回滚。`;
+const releaseBody = `## 超级反代 ${tag}\n\n${changes}\n\n### 桌面安装与更新\n\n- 版本化 Windows x64 便携桌面包，解压后运行 WorkBuddy Gateway.exe。\n- 公开仓库的桌面菜单“软件 → 检查桌面更新”可直接读取 GitHub Release，无需朋友电脑登录 GitHub；只有发布新版本时才需要仓库写权限。\n- 更新包使用 SHA-256 校验；账号数据与 GitHub 凭据不包含在附件中。\n- 首次从无更新功能的旧版升级时，请先安装本版并保留 data 目录。\n- 后续更新由用户确认后安装，保留账号和设置；上一版程序保留用于回滚。`;
 const out = join(root, 'release', `publish-${tag}`);
 const manifest = JSON.parse(await readFile(join(out, 'update-manifest.json'), 'utf8'));
 if (manifest.version !== metadata.version || manifest.repository !== repository ||
