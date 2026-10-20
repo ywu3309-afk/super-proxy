@@ -1,5 +1,13 @@
 # 更新记录
 
+## 1.2.2（TRAE 工具协议与网关自动恢复）
+
+- 修复 Python 网关退出后桌面仍显示但端口离线的问题：运行期异常退出采用固定端口、有限退避自动恢复，并验证启动实例标记；正常退出或更新不重启子进程。
+- TRAE 原生模型新增 structured-text 工具桥，支持 OpenAI `tools/tool_choice/parallel_tool_calls`、工具调用结果回传及多轮循环。工具由 DSH 等外部客户端执行，不开放 TRAE 内置文件或命令工具，不冒称原生 function calling。
+- 支持普通响应和缓冲 SSE 的工具调用，正确返回独立调用 ID、函数参数和 `finish_reason=tool_calls`；工具名称/参数/策略、响应 nonce、JSON 格式、历史关联和上下文大小均校验，无效输出不重放。
+- 兼容 developer 文本角色、空工具字段和 `max_completion_tokens` 别名；旧 HTTP 模型仍显式拒绝工具，采样参数不被静默忽略。增加工具协议、健康握手和生命周期回归测试。
+- 保持 WorkBuddy/TRAE 账号、凭据、设置和用量隔离，无新增生产依赖。
+
 ## 1.2.1（TRAE 原生新模型目录与文本桥接）
 
 - 修复旧 `model_list?type=chat` 只返回 5 个历史模型的问题；桌面版优先调用当前 TRAE 的原生 `model_list_by_function` 动态发现目录，不硬编码“最新”模型名。
