@@ -682,6 +682,28 @@ def dsh_default_model(text, provider, model):
     return out
 
 
+def _model_supports_image(entry):
+    """Only explicit gateway capabilities; conflicting negatives win."""
+    if not isinstance(entry, dict):
+        return False
+    objects = [entry]
+    objects.extend(entry[key] for key in ("capabilities", "abilities")
+                   if isinstance(entry.get(key), dict))
+    flags = [obj[key] for obj in objects
+             for key in ("vision", "supportsVision", "supports_vision", "supports_images", "supportsImages", "multimodal")
+             if type(obj.get(key)) is bool]
+    arrays = [entry.get("input"), entry.get("input_modalities")]
+    for key, field in (("modalities", "input"), ("architecture", "input_modalities")):
+        if isinstance(entry.get(key), dict):
+            arrays.append(entry[key].get(field))
+    declared = ["image" in values for values in arrays
+                if isinstance(values, list) and values
+                and all(isinstance(value, str) and value in ("text", "image", "audio", "video", "file") for value in values)]
+    if entry.get("disabledMultimodal") is True or any(value is False for value in flags + declared):
+        return False
+    return any(value is True for value in flags + declared)
+
+
 def _apply_dsh(paths, ctx):
     settings_path = paths["settings"]
     text = _read_text(settings_path)
@@ -690,7 +712,8 @@ def _apply_dsh(paths, ctx):
         mid = entry.get("id")
         if not mid:
             continue
-        item = {"id": mid}
+        vision = _model_supports_image(entry)
+        item = {"id": mid, "input": ["text", "image"] if vision else ["text"]}
         if entry.get("context_window"):
             item["contextWindow"] = entry["context_window"]
         if entry.get("max_output"):
@@ -701,7 +724,7 @@ def _apply_dsh(paths, ctx):
         levels = dsh_reasoning_levels(entry.get("reasoning_efforts"))
         if levels:
             item["reasoningEfforts"] = levels
-        if entry.get("supports_vision") or entry.get("supportsVision"):
+        if vision:
             item["supportsVision"] = True
         models.append(item)
     provider = {
@@ -1220,6 +1243,8 @@ def fetch_models_from_gateway(base_url, api_key, timeout=10):
             continue
         seen.add(mid)
         entry = {"id": mid}
+        entry["supports_vision"] = _model_supports_image(item)
+        entry["input"] = ["text", "image"] if entry["supports_vision"] else ["text"]
         context = item.get("context_length") or item.get("max_input_tokens")
         if context:
             try:

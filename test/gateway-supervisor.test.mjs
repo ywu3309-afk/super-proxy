@@ -269,13 +269,14 @@ test('shutdown while launch is pending disposes the late child and never publish
 
 // Run the real main.cjs wiring with in-memory Electron/process/network doubles.
 // No real app, process, account data, socket or filesystem write is involved.
-function desktopFixture({ bridgeGate, wrongHealthId = false } = {}) {
+function desktopFixture({ bridgeGate, wrongHealthId = false, delayedKill = false } = {}) {
   const files = new Map();
   const children = [];
   const probes = [];
   const ports = [];
   const pages = [];
   const dialogs = [];
+  const logs = [];
   const timers = new Map();
   let serial = 0, bridgeCreates = 0, bridgeCloses = 0, occupied = false;
   const app = new EventEmitter();
@@ -301,7 +302,7 @@ function desktopFixture({ bridgeGate, wrongHealthId = false } = {}) {
       Tray: class {}, shell: {}, nativeImage: {}, dialog: { showErrorBox: (...args) => dialogs.push(args) }
     },
     'node:fs': {
-      existsSync: () => true, mkdirSync() {}, appendFileSync() {},
+      existsSync: () => true, mkdirSync() {}, appendFileSync: (file, value) => logs.push(String(value)),
       writeFileSync: (file, value) => files.set(file, value), rmSync: file => files.delete(file)
     },
     'node:http': {
@@ -343,7 +344,19 @@ function desktopFixture({ bridgeGate, wrongHealthId = false } = {}) {
         child.stderr = new EventEmitter();
         child.env = options.env;
         child.args = args;
+        child.killCalls = 0;
         child.kill = () => {
+          child.killCalls++;
+          if (delayedKill) {
+            if (child.killed) return false;
+            child.killed = true;
+            setTimeout(() => {
+              child.exitCode = 0;
+              child.signalCode = 'SIGTERM';
+              child.emit('exit', 0, 'SIGTERM');
+            }, 10);
+            return true;
+          }
           if (child.exitCode === null) {
             child.exitCode = 0;
             child.signalCode = 'SIGTERM';
@@ -376,7 +389,7 @@ function desktopFixture({ bridgeGate, wrongHealthId = false } = {}) {
   };
   vm.runInNewContext(readFileSync(desktopPath, 'utf8') + '\nmodule.exports = { bootGateway, createWindow, gatewaySupervisor, waitForHealthy };', context, { filename: desktopPath });
   return {
-    ...context.module.exports, files, children, probes, ports, pages, dialogs, timers,
+    ...context.module.exports, files, children, probes, ports, pages, dialogs, timers, logs,
     get bridgeCreates() { return bridgeCreates; }, get bridgeCloses() { return bridgeCloses; },
     occupyPort() { occupied = true; },
     async crash() {
@@ -421,6 +434,18 @@ test('desktop recovery preserves port, reuses TRAE bridge and republishes the ne
   assert.equal(f.bridgeCloses, 1);
   assert.equal(f.gatewaySupervisor.state, 'stopped');
   assert.equal(f.timers.size, 0);
+});
+
+test('desktop quit waits for an already-signalled child instead of killing it twice', async () => {
+  const f = desktopFixture({ delayedKill: true });
+  await f.bootGateway();
+  await f.quit();
+  await new Promise(resolve => setTimeout(resolve, 25));
+  await flush();
+  assert.equal(f.children[0].killCalls, 1);
+  assert.equal(f.children[0].exitCode, 0);
+  assert.equal(f.logs.some(line => line.includes('[gateway-stop-error]')), false);
+  assert.equal(f.gatewaySupervisor.state, 'stopped');
 });
 
 test('desktop health rejects an unrelated HTTP 200 with the wrong launch identity', async () => {

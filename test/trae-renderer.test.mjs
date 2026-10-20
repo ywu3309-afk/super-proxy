@@ -86,6 +86,45 @@ test('native catalog returns sanitized exact names, not keys or raw payloads', a
   assert.ok(!JSON.stringify(result).includes('private-target-secret'));
 });
 
+test('selected preset numeric limits follow the official custom_model request', async () => {
+  const r = runtime({ models: [preset('other-model', { max_tokens: 7 }), preset(modelId, {
+    max_tokens: 64000, max_turn: 70, prompt_max_tokens: 936000,
+    extra_limit: 'private-target-secret'
+  })] });
+  assert.equal((await r.run()).response, 'MODEL_OK');
+  const custom = r.calls.find(call => call.method === 'chat').data.custom_model;
+  assert.equal(custom.max_tokens, 64000);
+  assert.equal(custom.max_turn, 70);
+  assert.equal(custom.prompt_max_tokens, 936000);
+  assert(!('extra_limit' in custom));
+  const catalog = await r.run({ operation: 'catalog', model: undefined });
+  assert.deepEqual(catalog.models, [
+    { upstreamId: 'other-model', name: 'OTHER-MODEL', route: 'native_client' },
+    { upstreamId: modelId, name: modelId.toUpperCase(), route: 'native_client' }
+  ]);
+});
+
+test('missing preset limits are not invented and numeric strings are normalized', async () => {
+  const absent = runtime();
+  assert.equal((await absent.run()).response, 'MODEL_OK');
+  const custom = absent.calls.find(call => call.method === 'chat').data.custom_model;
+  for (const key of ['max_tokens', 'max_turn', 'prompt_max_tokens']) assert(!(key in custom));
+  const strings = runtime({ models: [preset(modelId, { max_tokens: '64000', max_turn: '0', prompt_max_tokens: null })] });
+  assert.equal((await strings.run()).response, 'MODEL_OK');
+  const normalized = strings.calls.find(call => call.method === 'chat').data.custom_model;
+  assert.equal(normalized.max_tokens, 64000);
+  assert.equal(normalized.max_turn, 0);
+  assert(!('prompt_max_tokens' in normalized));
+});
+
+test('invalid selected preset limits fail before creating a project or session', async () => {
+  for (const invalid of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1, Infinity, true, {}, 'private-target-secret']) {
+    const r = runtime({ models: [preset(modelId, { max_tokens: invalid })] });
+    assert.equal((await r.run()).error.code, 'invalid_native_response');
+    assert.deepEqual(r.calls.map(call => call.method), ['model_list_by_function']);
+  }
+});
+
 test('wrong current account fails before any RPC and does not disclose either UID', async () => {
   const r = runtime({ currentUid: 'other-private-user' });
   const result = await r.run();
@@ -163,6 +202,38 @@ test('empty thought snapshot clears earlier partial text while final params summ
   const result = await r.run();
   assert.equal(result.response, 'MODEL_OK');
   assert.equal(result.reasoning_content, 'Reason');
+});
+
+test('encoded finish parameters replace earlier object-form partial snapshots', async () => {
+  const text = '{"bridge_nonce":"fixture","content":null,"tool_calls":[{"name":"write","arguments":{"content":"complete"}}]}';
+  for (const params of [JSON.stringify({ summary: text }), JSON.stringify(JSON.stringify({ summary: text }))]) {
+    const r = runtime({ events: [modelConfig(),
+      event('plan_item', { id: 'same-plan', tool_call_info: { name: 'finish', params: { summary: text.slice(0, -10) } } }),
+      event('plan_item', { id: 'same-plan', thought: '', tool_call_info: { name: 'finish', params } }), done()] });
+    assert.equal((await r.run()).response, text);
+  }
+});
+
+test('incomplete encoded parameters are not repaired and a later complete frame wins', async () => {
+  const r = runtime({ events: [modelConfig(),
+    event('plan_item', { tool_call_info: { name: 'finish', params: '{"summary":"incomplete' } }),
+    final('COMPLETE_TEXT'), done()] });
+  assert.equal((await r.run()).response, 'COMPLETE_TEXT');
+  const incomplete = runtime({ events: [modelConfig(),
+    event('plan_item', { tool_call_info: { name: 'finish', params: '{"summary":"incomplete' } }), done()] });
+  assert.equal((await incomplete.run()).error.code, 'empty_response');
+});
+
+test('encoded parameters with non-string summary remain invalid and decoding depth is bounded', async () => {
+  for (const summary of [null, 7, {}, []]) {
+    const r = runtime({ events: [modelConfig(), event('plan_item', {
+      tool_call_info: { name: 'finish', params: JSON.stringify({ summary }) } }), done()] });
+    assert.equal((await r.run()).error.code, 'invalid_native_response');
+  }
+  let params = { summary: 'TOO_DEEP' };
+  for (let depth = 0; depth < 5; depth++) params = JSON.stringify(params);
+  const r = runtime({ events: [modelConfig(), event('plan_item', { tool_call_info: { name: 'finish', params } }), done()] });
+  assert.equal((await r.run()).error.code, 'empty_response');
 });
 
 test('empty finish summary preserves an existing normal thought snapshot', async () => {

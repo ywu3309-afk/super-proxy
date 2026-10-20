@@ -19,7 +19,17 @@ async function performTraeOperation(input, moduleUrl, deps) {
   const failure = (code) => Object.assign(new Error(messages[code]), { safeCode: code });
   const modelPattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/;
   const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+  // Official effectiveParams accepts JSON-string tool parameters as well as
+  // objects. Late finish frames can otherwise leave an earlier partial summary.
+  // Bound decoding; never repair malformed JSON or evaluate parameter text.
+  const effectiveParams = (value) => {
+    for (let depth = 0; depth < 4 && typeof value === 'string'; depth++) {
+      try { value = JSON.parse(value); } catch { break; }
+    }
+    return value;
+  };
   let client, sandbox, stream, subscription, projectId, sessionId, messageId;
+  const selectedModelLimits = {};
   let chatStarted = false;
   let deadline = 0;
   const maxEvents = 4096;
@@ -71,6 +81,17 @@ async function performTraeOperation(input, moduleUrl, deps) {
         const name = model.display_name == null || model.display_name === '' ? model.name : model.display_name;
         if (typeof name !== 'string' || !name.length || name.length > 160 || name !== name.trim()
             || /[\p{C}]/u.test(name)) continue;
+        // The official createChatRequestObject carries these preset limits in
+        // custom_model. Dropping them silently selects backend defaults instead.
+        // Keep only numeric fields for the selected model, never raw config.
+        if (model.name === input.model) {
+          for (const key of ['max_tokens', 'max_turn', 'prompt_max_tokens']) {
+            if (model[key] == null) continue;
+            const limit = numericToken(model[key]);
+            if (limit === null) throw failure('invalid_native_response');
+            selectedModelLimits[key] = limit;
+          }
+        }
         result.push({ upstreamId: model.name, name, route: 'native_client' });
         seen.add(model.name);
       }
@@ -161,7 +182,7 @@ async function performTraeOperation(input, moduleUrl, deps) {
       model_name: model.upstreamId,
       custom_model: { provider: '', config_name: model.upstreamId, display_model_name: model.name,
         multimodal: false, ak: '', sk: '', base_url: '', auth_type: 0, use_remote_service: true,
-        is_preset: true, config_source: 1 }, terminal_context: [],
+        is_preset: true, config_source: 1, ...selectedModelLimits }, terminal_context: [],
       message_content: [{ type: 'text', text_content: '仅返回纯文本，不调用 TRAE 内置工具，不读取或修改文件，不执行命令。若输入要求生成外部工具协议 JSON，仅将它作为文本输出，由外部客户端执行。\n\n' + input.prompt }],
       code_selections: [], scene_location: 2, parsed_query: [], multi_media: [], workspace_folders: [],
       is_workspace_folder_changed: false, active_text_editor: null, asr_times: 0 };
@@ -209,11 +230,12 @@ async function performTraeOperation(input, moduleUrl, deps) {
               && (tool.id == null || (typeof tool.id === 'string' && tool.id.length <= 256 && !/[\p{C}]/u.test(tool.id)))
               && emptyObject(tool.params) && isObject(tool.result) && Object.keys(tool.result).length === 0;
             if (!isObject(tool) || (!placeholder && tool.name !== 'finish')) throw failure('tool_not_allowed');
-            if (tool.name === 'finish' && isObject(tool.params) && 'summary' in tool.params) {
-              if (typeof tool.params.summary !== 'string') throw failure('invalid_native_response');
+            const params = tool.name === 'finish' ? effectiveParams(tool.params) : tool.params;
+            if (tool.name === 'finish' && isObject(params) && 'summary' in params) {
+              if (typeof params.summary !== 'string') throw failure('invalid_native_response');
               // Official IPlanItemParser only lets a truthy summary replace
               // thought. Empty summary falls back to the latest item snapshots.
-              summary = tool.params.summary || null;
+              summary = params.summary || null;
             }
           }
           if (kind === 'model_config') {

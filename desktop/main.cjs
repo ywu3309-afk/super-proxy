@@ -170,7 +170,7 @@ function stopGatewayChild(child) {
     const exited = () => { clearTimeout(timer); resolve(); };
     child.once('exit', exited);
     try {
-      if (!child.kill()) {
+      if (!child.killed && !child.kill()) {
         clearTimeout(timer);
         child.removeListener('exit', exited);
         reject(new Error('无法停止网关子进程，已停止自动重启'));

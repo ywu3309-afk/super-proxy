@@ -285,9 +285,25 @@ function codexHome(home) {
   return process.env.CODEX_HOME || join(home, '.codex');
 }
 
-/** DSH 的模型条目：只带它认的字段（id / contextWindow / maxTokens / reasoningEfforts）。 */
+/** Only explicit gateway image declarations; conflicting negatives win. */
+export function modelSupportsImage(entry) {
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return false;
+  const objects = [entry, entry.capabilities, entry.abilities]
+    .filter((value) => value && typeof value === 'object' && !Array.isArray(value));
+  const flags = objects.flatMap((object) => ['vision', 'supportsVision', 'supports_vision', 'supports_images', 'supportsImages', 'multimodal']
+    .map((key) => object[key]).filter((value) => typeof value === 'boolean'));
+  const arrays = [entry.input, entry.input_modalities, entry.modalities?.input, entry.architecture?.input_modalities];
+  const declared = arrays.filter((values) => Array.isArray(values) && values.length
+    && Array.from(values).every((value) => typeof value === 'string' && ['text', 'image', 'audio', 'video', 'file'].includes(value)))
+    .map((values) => values.includes('image'));
+  if (entry.disabledMultimodal === true || [...flags, ...declared].some((value) => value === false)) return false;
+  return [...flags, ...declared].some((value) => value === true);
+}
+
+/** DSH model entry; input defaults explicitly to text rather than guessing by ID. */
 export function dshModelEntry(entry) {
-  const item = { id: entry.id };
+  const vision = modelSupportsImage(entry);
+  const item = { id: entry.id, input: vision ? ['text', 'image'] : ['text'] };
   if (entry.context_window) item.contextWindow = entry.context_window;
   if (entry.max_output) {
     const value = Number(entry.max_output);
@@ -295,7 +311,7 @@ export function dshModelEntry(entry) {
   }
   const levels = dshReasoningLevels(entry.reasoning_efforts);
   if (levels) item.reasoningEfforts = levels;
-  if (entry.supports_vision || entry.supportsVision) item.supportsVision = true;
+  if (vision) item.supportsVision = true;
   return item;
 }
 
@@ -683,6 +699,7 @@ export function modelsForAgents(catalog, { limit = 40, reasoning = null } = {}) 
     context_window: item.contextWindow || item.context_window || 0,
     max_output: item.maxOutput || item.max_output || 0,
     reasoning_efforts: reasoning || item.reasoningEfforts || item.reasoning_efforts || null,
-    supports_vision: Boolean(item.vision || item.supportsVision)
+    supports_vision: modelSupportsImage(item),
+    input: modelSupportsImage(item) ? ['text', 'image'] : ['text']
   }));
 }

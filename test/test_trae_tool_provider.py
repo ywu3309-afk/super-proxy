@@ -32,8 +32,12 @@ class ToolProviderTests(unittest.TestCase):
             self.fixture.native.chat_calls.append({'model': model, 'messages': copy.deepcopy(messages), 'max_chars': max_chars})
             instruction = messages[0]['content'][0]['text']
             nonce = instruction.split('bridge_nonce must equal ', 1)[1].split('. ', 1)[0]
-            content, calls = self.outputs.pop(0)
-            text = json.dumps({'bridge_nonce': json.loads(nonce), 'content': content, 'tool_calls': calls})
+            answer = self.outputs.pop(0)
+            if isinstance(answer, str):
+                text = answer
+            else:
+                content, calls = answer
+                text = json.dumps({'bridge_nonce': json.loads(nonce), 'content': content, 'tool_calls': calls})
             return fixtures.chat_value(response=text, reasoning_content='')
 
         self.patch = mock.patch.object(self.fixture.native, 'chat', side_effect=native_answer)
@@ -87,6 +91,75 @@ class ToolProviderTests(unittest.TestCase):
             self.provider.chat(self.payload)
         self.assertEqual(error.exception.code, 'tools_require_native_client')
         self.assertEqual(self.fixture.native.chat_calls, [])
+
+    def test_plain_final_nonstream_has_explicit_metadata_and_no_replay(self):
+        self.outputs.append('你好！有什么可以帮你？')
+        answer = self.provider.chat(self.payload)
+        self.assertEqual(answer['choices'][0]['message'], {'role': 'assistant', 'content': '你好！有什么可以帮你？'})
+        self.assertEqual(answer['choices'][0]['finish_reason'], 'stop')
+        self.assertEqual(answer['provider_metadata']['response_format'], 'plain_text_final')
+        self.assertEqual(len(self.fixture.native.chat_calls), 1)
+        self.assertEqual(self.outputs, [])
+
+    def test_plain_final_sse_is_stop_without_tool_chunks_and_no_replay(self):
+        self.outputs.append('Hello!')
+        chunks = list(self.provider.stream({**self.payload, 'stream': True, 'tool_choice': 'none'}))
+        self.assertEqual(chunks[-1]['choices'][0]['finish_reason'], 'stop')
+        self.assertEqual(''.join(row['choices'][0]['delta'].get('content', '') for row in chunks), 'Hello!')
+        self.assertTrue(all(not row['choices'][0]['delta'].get('tool_calls') for row in chunks))
+        self.assertTrue(all(row['provider_metadata']['response_format'] == 'plain_text_final' for row in chunks))
+        self.assertEqual(len(self.fixture.native.chat_calls), 1)
+
+    def test_single_outer_close_final_is_marked_for_json_and_sse_without_replay(self):
+        original = self.fixture.native.chat.side_effect
+
+        def missing_brace(*args, **kwargs):
+            value = original(*args, **kwargs)
+            value['response'] = value['response'][:-1]
+            return value
+
+        self.fixture.native.chat.side_effect = missing_brace
+        self.outputs.append(('你好！', []))
+        answer = self.provider.chat(self.payload)
+        self.assertEqual(answer['choices'][0]['message'], {'role': 'assistant', 'content': '你好！'})
+        self.assertEqual(answer['provider_metadata']['response_format'], 'single_outer_close_final')
+        self.outputs.append(('Hello!', []))
+        chunks = list(self.provider.stream({**self.payload, 'stream': True}))
+        self.assertEqual(chunks[-1]['choices'][0]['finish_reason'], 'stop')
+        self.assertEqual(''.join(row['choices'][0]['delta'].get('content', '') for row in chunks), 'Hello!')
+        self.assertTrue(all(not row['choices'][0]['delta'].get('tool_calls') for row in chunks))
+        self.assertTrue(all(row['provider_metadata']['response_format'] == 'single_outer_close_final' for row in chunks))
+        self.assertEqual(len(self.fixture.native.chat_calls), 2)
+        self.assertEqual(self.outputs, [])
+
+    def test_missing_brace_tool_call_is_rejected_before_first_chunk_without_replay(self):
+        original = self.fixture.native.chat.side_effect
+
+        def missing_brace(*args, **kwargs):
+            value = original(*args, **kwargs)
+            value['response'] = value['response'][:-1]
+            return value
+
+        self.fixture.native.chat.side_effect = missing_brace
+        self.outputs.append((None, [self.call()]))
+        with self.assertRaises(trae.TraeError) as error:
+            next(self.provider.stream({**self.payload, 'stream': True}))
+        self.assertEqual(error.exception.code, 'invalid_tool_response')
+        self.assertEqual(len(self.fixture.native.chat_calls), 1)
+
+    def test_forced_and_suspected_tool_json_fail_before_first_chunk_without_replay(self):
+        cases = [('required', '你好！'),
+                 ({'type': 'function', 'function': {'name': 'write_file'}}, 'Hello!'),
+                 ('auto', 'Here is tool JSON: {"tool_calls":'),
+                 ('none', '```json\n{"tool_calls":[]}\n```')]
+        for choice, text in cases:
+            self.outputs.append(text)
+            before = len(self.fixture.native.chat_calls)
+            with self.assertRaises(trae.TraeError) as error:
+                next(self.provider.stream({**self.payload, 'stream': True, 'tool_choice': choice}))
+            self.assertEqual(error.exception.code, 'invalid_tool_response')
+            self.assertEqual(len(self.fixture.native.chat_calls), before + 1)
+            self.assertEqual(self.outputs, [])
 
     def test_developer_role_and_max_completion_tokens_alias(self):
         payload = {**self.fixture.payload, 'messages': [{'role': 'developer', 'content': 'rule'},

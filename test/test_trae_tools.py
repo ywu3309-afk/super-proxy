@@ -162,7 +162,7 @@ class ToolBridgeTests(unittest.TestCase):
 
     def test_output_strict_structure_nonce_and_no_markdown(self):
         plan = bridge.prepare(request())
-        invalid = ["plain answer", "```json\n" + output(plan) + "\n```", "[]",
+        invalid = ["tool_calls incomplete", "prefix ```json\n" + output(plan) + "\n```", "[]",
                    output(plan, extra=True), output(plan).replace(plan.nonce, "wrong"),
                    output(plan) + " trailing", output(plan, content=None), output(plan, content=[]),
                    '{"bridge_nonce":"' + plan.nonce + '","content":"x","content":"y","tool_calls":[]}',
@@ -171,6 +171,89 @@ class ToolBridgeTests(unittest.TestCase):
         for value in invalid:
             self.assert_error(lambda: plan.parse(value), "invalid_tool_response", 502)
         self.assert_error(lambda: plan.parse(" " * (bridge.MAX_OUTPUT_CHARS + 1)), status=502)
+
+    def test_full_json_fence_preserves_strict_nonce_tools_and_parameters(self):
+        plan = bridge.prepare(request())
+        call = {"name": "read_file", "arguments": {"path": "x"}}
+        for language in ("json", "JSON"):
+            result = plan.parse(" \n```" + language + "\n" + output(plan, [call], None) + "\n```\n ")
+            self.assertEqual(result["finish_reason"], "tool_calls")
+            self.assertEqual(result["tool_calls"][0]["function"]["name"], "read_file")
+            self.assertNotIn("response_format", result)
+        invalid = [output(plan).replace(plan.nonce, "bad"), output(plan, [{"name": "missing", "arguments": {}}]),
+                   output(plan, [{"name": "read_file", "arguments": {"path": 1}}]),
+                   '{"bridge_nonce":"' + plan.nonce + '","content":"a","content":"b","tool_calls":[]}']
+        for text in invalid:
+            self.assert_error(lambda: plan.parse("```json\n" + text + "\n```"), status=502)
+        for text in ("before\n```json\n" + output(plan) + "\n```", "```json\n" + output(plan) + "\n```\nafter",
+                     "```python\n" + output(plan) + "\n```", "```json\nhello\n```",
+                     "```json\n" + output(plan) + "\n```\n```json\n" + output(plan) + "\n```"):
+            self.assert_error(lambda: plan.parse(text), status=502)
+
+    def test_only_auto_none_can_use_obvious_plain_text_final(self):
+        for choice in ("auto", "none"):
+            plan = bridge.prepare(request(tool_choice=choice))
+            for text in ("你好！有什么可以帮你？", "Hello! How can I help?", "  A final answer.\n谢谢！  ",
+                         "A function accepts arguments and parameters. The tool_choice is auto.",
+                         "Here is an array [] and an object {}.", "`code`", "<h1>Hello</h1>",
+                         '```python\nprint({"hello": []})\n```', "Saved to D:\\example\\result.txt."):
+                self.assertEqual(plan.parse(text), {"content": text, "tool_calls": [], "finish_reason": "stop",
+                                                   "response_format": "plain_text_final"})
+        for choice in ("required", {"type": "function", "function": {"name": "read_file"}}):
+            plan = bridge.prepare(request(tool_choice=choice))
+            self.assert_error(lambda: plan.parse("你好！"), status=502)
+
+    def test_single_missing_outer_brace_is_only_a_marked_final_text(self):
+        for choice in ("auto", "none"):
+            plan = bridge.prepare(request(tool_choice=choice))
+            text = '你好！代码示例 {"value": [1]} 不应被改动。'
+            self.assertEqual(plan.parse(" \n" + output(plan, content=text)[:-1] + " \n"),
+                             {"content": text, "tool_calls": [], "finish_reason": "stop",
+                              "response_format": "single_outer_close_final"})
+        for choice in ("required", {"type": "function", "function": {"name": "read_file"}}):
+            plan = bridge.prepare(request(tool_choice=choice))
+            self.assert_error(lambda: plan.parse(output(plan)[:-1]), status=502)
+
+    def test_outer_brace_compat_never_repairs_calls_nonce_schema_or_other_syntax(self):
+        plan = bridge.prepare(request())
+        call = {"name": "read_file", "arguments": {"path": "x"}}
+        invalid = [output(plan, [call], None)[:-1], output(plan, [call], "Calling tool")[:-1],
+                   output(plan).replace(plan.nonce, "wrong")[:-1], output(plan, content=None)[:-1],
+                   output(plan, content="")[:-1], output(plan, content="  ")[:-1],
+                   output(plan, content=[])[:-1], output(plan, extra=True)[:-1], output(plan)[:-2],
+                   output(plan).replace('"done"', '"unterminated')[:-1],
+                   output(plan).replace('"done"', '"\\ud800"')[:-1],
+                   '{"bridge_nonce":"' + plan.nonce + '","content":"a","content":"b","tool_calls":[]',
+                   'prose ' + output(plan)[:-1], '```json\n' + output(plan)[:-1] + '\n```']
+        for text in invalid:
+            self.assert_error(lambda: plan.parse(text), "invalid_tool_response", 502)
+        plan.max_output_chars = len(output(plan)) - 1
+        self.assert_error(lambda: plan.parse(output(plan)[:-1]), status=502)
+
+    def test_plain_text_fallback_never_repairs_suspected_protocol(self):
+        plan = bridge.prepare(request())
+        bad = ["", "   ", "{", "[", "<tool_call>read_file</tool_call>",
+               "<｜tool▁calls▁begin｜>", "bridge_nonce: missing", 'Here is JSON: {"tool_calls":',
+               "tool_calls: missing", "tool_call: missing", "function_call: missing", "call_deadbeef", "NaN", "Infinity",
+               "undefined", "hello " + plan.nonce, "hello\ud800", "hello\x00", '"unterminated',
+               "1e999", "true", "null", '"ordinary valid JSON string"']
+        for text in bad:
+            self.assert_error(lambda: plan.parse(text), "invalid_tool_response", 502)
+
+    def test_trailing_format_reminder_uses_same_nonce_and_counts_toward_limit(self):
+        plan = bridge.prepare(request())
+        self.assertEqual([message["role"] for message in plan.messages], ["system", "user", "system"])
+        reminder = plan.messages[-1]["content"][0]["text"]
+        self.assertIn(plan.nonce, reminder)
+        self.assertIn('"tool_calls":[]', reminder)
+        self.assertIn("INSIDE content", reminder)
+        self.assertIn("required/forced", reminder)
+        self.assertIn("```json\n", reminder)
+        self.assertIn("closing outer }", reminder)
+        length = sum(len(message["content"][0]["text"].encode("utf-16-le")) // 2 for message in plan.messages)
+        from unittest import mock
+        with mock.patch.object(bridge, "MAX_PROMPT_UTF16", length - 1):
+            self.assert_error(lambda: bridge.prepare(request()), "request_too_large", 413)
 
     def test_unknown_tools_arguments_extra_keys_and_calls_limit_fail(self):
         plan = bridge.prepare(request())

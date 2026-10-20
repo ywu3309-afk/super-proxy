@@ -995,6 +995,8 @@ class TraeProvider:
         if plan:
             metadata["tool_calling"] = "structured_text"
             metadata["tool_execution"] = "client"
+            if parsed.get("response_format") in ("plain_text_final", "single_outer_close_final", "framed_json_v2"):
+                metadata["response_format"] = parsed["response_format"]
 
         def chunk(delta, finish=None, usage=None):
             result = {"id": response_id, "created": created, "object": "chat.completion.chunk", "model": model,
