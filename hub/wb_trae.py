@@ -331,6 +331,13 @@ class TraeProvider:
     def __init__(self, data_root, *, opener=None, protector=None, local_reader=None,
                  native_client=None, catalog_reader=None):
         self.root = Path(data_root).resolve() / "trae"
+        # Request telemetry is deliberately separate from account records.  It
+        # contains only local, non-secret counters used by the TRAE panel; no
+        # token, cookie, prompt, image bytes or raw upstream response is ever
+        # written here.
+        self.metrics_path = self.root / "requests.jsonl"
+        self._metrics_cache_at = 0.0
+        self._metrics_cache = None
         self._lock = threading.RLock()
         self._account_locks = {}
         self._opener = opener or urllib.request.build_opener(_NoRedirect())
@@ -339,6 +346,122 @@ class TraeProvider:
         self._native = native_client if native_client is not None else NativeTraeClient()
         self._catalog_reader = catalog_reader or read_local_model_catalog
         self._cursor = 0
+
+    @staticmethod
+    def _metric_int(value):
+        return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+    def _record_request(self, row, model, body, started, *, usage=None, outcome="completed", error=None):
+        """Append one redacted TRAE request row for the local dashboard."""
+        try:
+            usage = usage if isinstance(usage, dict) else {}
+            prompt = self._metric_int(usage.get("prompt_tokens"))
+            completion = self._metric_int(usage.get("completion_tokens"))
+            reasoning = self._metric_int(usage.get("reasoning_tokens"))
+            total = self._metric_int(usage.get("total_tokens")) or prompt + completion + reasoning
+            route = ""
+            try:
+                route = next((str(item.get("route") or "") for item in row.get("models", [])
+                              if item.get("upstreamId") == model[5:]), "")
+            except Exception:
+                route = ""
+            record = {
+                "at": int(time.time() * 1000),
+                "model": model,
+                "account": str(row.get("label") or "TRAE"),
+                "route": route,
+                "mode": "vision" if body.get("_images") else "tools" if body.get("_tool_plan") else "text",
+                "status": "completed" if outcome == "completed" else "error",
+                "errorCode": str(error or "")[:80],
+                "latencyMs": max(0, int((time.monotonic() - started) * 1000)),
+                "promptTokens": prompt,
+                "completionTokens": completion,
+                "reasoningTokens": reasoning,
+                "totalTokens": total,
+            }
+            self.root.mkdir(parents=True, exist_ok=True)
+            with self.metrics_path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
+            self._metrics_cache_at = 0.0
+        except (OSError, TypeError, ValueError):
+            # Telemetry must never change the request outcome.
+            pass
+
+    def analytics(self):
+        """Return redacted all-time TRAE request analytics for the local panel."""
+        now = time.time()
+        with self._lock:
+            if self._metrics_cache is not None and now - self._metrics_cache_at < 5:
+                return self._metrics_cache
+            rows = []
+            try:
+                if self.metrics_path.is_file():
+                    # A bounded tail prevents a very old local history from
+                    # making a dashboard refresh expensive.
+                    lines = self.metrics_path.read_text(encoding="utf-8").splitlines()[-5000:]
+                    for line in lines:
+                        try:
+                            item = json.loads(line)
+                        except (ValueError, TypeError):
+                            continue
+                        if isinstance(item, dict):
+                            rows.append(item)
+            except (OSError, UnicodeError):
+                rows = []
+            total = success = errors = total_tokens = input_tokens = output_tokens = latency = 0
+            by_model = {}
+            by_account = {}
+            for item in rows:
+                total += 1
+                ok = item.get("status") == "completed"
+                success += 1 if ok else 0
+                errors += 0 if ok else 1
+                tokens = self._metric_int(item.get("totalTokens"))
+                prompt = self._metric_int(item.get("promptTokens"))
+                completion = self._metric_int(item.get("completionTokens"))
+                total_tokens += tokens
+                input_tokens += prompt
+                output_tokens += completion
+                latency += self._metric_int(item.get("latencyMs"))
+                model = str(item.get("model") or "unknown")
+                account = str(item.get("account") or "TRAE")
+                model_row = by_model.setdefault(model, {"model": model, "requests": 0, "success": 0,
+                    "errors": 0, "tokens": 0, "inputTokens": 0, "outputTokens": 0, "vision": 0})
+                model_row["requests"] += 1
+                model_row["success"] += 1 if ok else 0
+                model_row["errors"] += 0 if ok else 1
+                model_row["tokens"] += tokens
+                model_row["inputTokens"] += prompt
+                model_row["outputTokens"] += completion
+                model_row["vision"] += 1 if item.get("mode") == "vision" else 0
+                account_row = by_account.setdefault(account, {"account": account, "requests": 0,
+                    "success": 0, "errors": 0, "tokens": 0})
+                account_row["requests"] += 1
+                account_row["success"] += 1 if ok else 0
+                account_row["errors"] += 0 if ok else 1
+                account_row["tokens"] += tokens
+            denominator = success + errors
+            result = {
+                "summary": {
+                    "requests": total,
+                    "success": success,
+                    "errors": errors,
+                    "successRatePct": round(success * 100 / denominator, 1) if denominator else None,
+                    "totalTokens": total_tokens,
+                    "inputTokens": input_tokens,
+                    "outputTokens": output_tokens,
+                    "avgLatencyMs": round(latency / success) if success else None,
+                    "lastRequestAt": rows[-1].get("at") if rows else None,
+                },
+                "byModel": sorted(by_model.values(), key=lambda item: item["tokens"], reverse=True),
+                "byAccount": sorted(by_account.values(), key=lambda item: item["tokens"], reverse=True),
+                "recent": [{key: item.get(key) for key in (
+                    "at", "model", "account", "route", "mode", "status", "errorCode",
+                    "latencyMs", "totalTokens")} for item in rows[-30:][::-1]],
+            }
+            self._metrics_cache = result
+            self._metrics_cache_at = now
+            return result
 
     def _records(self):
         result = []
@@ -454,7 +577,8 @@ class TraeProvider:
                                     and model.get("supports_vision") is True)
             return {"provider": "trae", "accounts": accounts, "models": list(models.values()),
                     "client": {**self._client(), "nativeBridgeConfigured": bool(getattr(self._native, "configured", False))},
-                    "creditsScope": "account_pool_not_model_entitlement"}
+                    "creditsScope": "account_pool_not_model_entitlement",
+                    "metrics": self.analytics()}
 
     def models(self):
         return [{"id": m["id"], "object": "model", "owned_by": "trae", "name": m["name"],
@@ -884,7 +1008,24 @@ class TraeProvider:
     def stream(self, payload):
         model, body = self._payload(payload)
         row = self._choose(model)
-        return self._stream(row, model, body)
+        return self._tracked_stream(row, model, body)
+
+    def _tracked_stream(self, row, model, body):
+        started = time.monotonic()
+        usage = None
+        try:
+            for chunk in self._stream(row, model, body):
+                if isinstance(chunk, dict) and isinstance(chunk.get("usage"), dict):
+                    usage = chunk["usage"]
+                yield chunk
+        except TraeError as error:
+            self._record_request(row, model, body, started, usage=usage, outcome="error", error=error.code)
+            raise
+        except Exception:
+            self._record_request(row, model, body, started, usage=usage, outcome="error", error="internal_error")
+            raise
+        else:
+            self._record_request(row, model, body, started, usage=usage, outcome="completed")
 
     def _stream(self, row, model, body):
         with self._account_lock(row["id"]):

@@ -1339,12 +1339,46 @@ html[data-theme-style="cyber"] .dot{animation:cyberPulse 2.4s ease-in-out infini
 #pageTrae .trae-model button{flex-shrink:0}
 #pageTrae .trae-endpoint{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:14px;min-width:0}
 #pageTrae .trae-endpoint code{overflow-wrap:anywhere;min-width:0;max-width:100%}
+#pageTrae .trae-grid{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,.85fr);gap:12px;margin:0 0 16px}
+#pageTrae .trae-panel{border:1px solid var(--line);border-radius:var(--radius-card);background:var(--panel2);padding:16px;min-width:0}
+#pageTrae .trae-panel h2{margin:0 0 8px;font-size:16px;color:var(--fg)}
+#pageTrae .trae-panel h3{margin:14px 0 8px;font-size:13px;color:var(--fg)}
+#pageTrae .trae-config-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:10px 0}
+#pageTrae .trae-config-row>span:first-child{color:var(--dim);font-size:12px;min-width:74px}
+#pageTrae .trae-config-row code{flex:1 1 260px;min-width:0;overflow-wrap:anywhere;padding:8px 10px;border:1px solid var(--line);border-radius:var(--radius-control);background:var(--bg);color:var(--fg)}
+#pageTrae .trae-code{display:block;white-space:pre-wrap;overflow-wrap:anywhere;border:1px solid var(--line);border-radius:var(--radius-control);background:var(--bg);padding:10px;color:var(--fg);font:12px/1.55 var(--mono);margin:8px 0}
+#pageTrae .trae-steps{margin:10px 0 0;padding-left:20px;color:var(--dim);font-size:12px;line-height:1.7}
+#pageTrae .trae-steps strong{color:var(--fg)}
+#pageTrae .trae-diagnosis{border:1px solid var(--line);border-radius:var(--radius-control);padding:12px;background:var(--bg);line-height:1.6;font-size:12px}
+#pageTrae .trae-diagnosis.ok{border-color:var(--good);color:var(--fg)}
+#pageTrae .trae-diagnosis.warn{border-color:var(--warn);color:var(--fg)}
+#pageTrae .trae-diagnosis.error{border-color:var(--bad);color:var(--fg)}
+#pageTrae .trae-diagnosis-title{font-weight:700;margin-bottom:5px}
+#pageTrae .trae-chip-row{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+#pageTrae .trae-chip{display:inline-flex;align-items:center;gap:4px;border:1px solid var(--line);border-radius:999px;padding:3px 8px;color:var(--dim);font-size:11px}
+#pageTrae .trae-chip.ok{border-color:var(--good);color:var(--good)}
+#pageTrae .trae-chip.warn{border-color:var(--warn);color:var(--warn)}
+#pageTrae .trae-usage{margin-bottom:16px}
+#pageTrae .trae-usage-stats{grid-template-columns:repeat(4,minmax(0,1fr));margin:10px 0 14px}
+#pageTrae .trae-usage-columns{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px}
+#pageTrae .trae-usage-list{display:grid;gap:8px}
+#pageTrae .trae-usage-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:center;border-bottom:1px solid var(--line);padding:8px 0}
+#pageTrae .trae-usage-row:last-child{border-bottom:0}
+#pageTrae .trae-usage-row strong{display:block;overflow-wrap:anywhere}
+#pageTrae .trae-usage-row small{color:var(--dim)}
+#pageTrae .trae-recent{max-height:240px;overflow:auto;border-top:1px solid var(--line);margin-top:12px;padding-top:6px}
+#pageTrae .trae-recent-row{display:grid;grid-template-columns:110px minmax(0,1fr) auto;gap:8px;padding:7px 0;border-bottom:1px solid var(--line);font-size:11px}
+#pageTrae .trae-recent-row:last-child{border-bottom:0}
+#pageTrae .trae-recent-row code{overflow-wrap:anywhere}
+#pageTrae .trae-diagnosis code{font-size:11px}
 #pageTrae button:focus-visible,#pageTrae input:focus-visible,#pageTrae summary:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
 @media(max-width:640px){
   #pageTrae .trae-stats{grid-template-columns:repeat(2,minmax(0,1fr))}
   #pageTrae .trae-import-form{grid-template-columns:minmax(0,1fr)}
   #pageTrae .trae-stats .card{padding:12px}
   #pageTrae .trae-stats .card .v{font-size:20px}
+  #pageTrae .trae-grid,#pageTrae .trae-usage-columns{grid-template-columns:minmax(0,1fr)}
+  #pageTrae .trae-usage-stats{grid-template-columns:repeat(2,minmax(0,1fr))}
 }
 </style>
 <script>
@@ -3502,6 +3536,42 @@ html[data-theme-style="cyber"] .dot{animation:cyberPulse 2.4s ease-in-out infini
       <div class="card"><div class="k">未查询账号</div><div class="v" id="traeUnknownCount">—</div><div class="s">TRAE 积分</div></div>
       <div class="card"><div class="k">目录模型数</div><div class="v" id="traeModelCount">—</div><div class="s" id="traeClientVersion">本机 TRAE 客户端</div><div class="s" id="traeNativeBridgeStatus">原生桥接状态未知</div></div>
     </div>
+     <div class="trae-grid">
+       <section class="trae-panel" aria-labelledby="traeConfigTitle">
+         <h2 id="traeConfigTitle">API 接入配置</h2>
+         <p class="trae-note">给 DSH、Cherry Studio、Python 或其他 OpenAI 兼容客户端使用。TRAE 模型 ID 必须保留 <code>trae/</code> 前缀。</p>
+         <div class="trae-config-row"><span>Base URL</span><code id="traeConfigBaseUrl" data-no-i18n></code><button type="button" class="sec" onclick="copyTraeValue(document.getElementById('traeConfigBaseUrl').textContent)">复制</button></div>
+         <div class="trae-config-row"><span>认证方式</span><code>Authorization: Bearer &lt;网关 API Key&gt;</code></div>
+         <div class="trae-config-row"><span>当前模型</span><select id="traeQuickModel" class="slot-select" onchange="renderTraeQuickExample()"></select><button type="button" class="sec" onclick="copyTraeCurl()">复制 curl</button></div>
+         <pre id="traeCurlExample" class="trae-code" data-no-i18n></pre>
+         <ol class="trae-steps">
+           <li><strong>先到“设置”配置或生成网关 API Key</strong>，不要把 TRAE 登录凭据填到 OpenAI 客户端。</li>
+           <li><strong>Base URL 填到 /v1 为止</strong>，不要再重复追加 <code>/chat/completions</code>。</li>
+           <li><strong>模型填完整 ID</strong>，例如 <code>trae/deepseek-v4.1-flash</code>；图片只选标记为“视觉”的原生模型。</li>
+         </ol>
+       </section>
+       <section class="trae-panel" aria-labelledby="traeDiagTitle">
+         <h2 id="traeDiagTitle">连接诊断</h2>
+         <div id="traeDiagnosis" class="trae-diagnosis">正在读取 TRAE 原生目录状态…</div>
+         <div id="traeCapabilities" class="trae-chip-row"></div>
+         <h3>目录来源怎么理解</h3>
+         <p class="trae-note">“旧接口”不是旧安装目录，而是 TRAE CN 未连接时的兼容回退目录。要看到最新模型，请启动官方 TRAE CN，登录与网关选定的同一个账号，再点击“刷新额度 / 模型”。</p>
+       </section>
+     </div>
+     <section class="trae-panel trae-usage" aria-labelledby="traeUsageTitle">
+       <div class="trae-header" style="margin-bottom:4px"><div><h2 id="traeUsageTitle">TRAE 调用看板</h2><p class="trae-note">只记录本机网关的脱敏统计，不保存提示词、图片、Token 或登录凭据。</p></div><button type="button" class="sec" data-trae-action onclick="loadTraeProvider()">刷新看板</button></div>
+       <div class="cards trae-usage-stats">
+         <div class="card"><div class="k">请求数</div><div class="v" id="traeMetricRequests">—</div><div class="s" id="traeMetricSuccess">成功 —</div></div>
+         <div class="card"><div class="k">成功率</div><div class="v" id="traeMetricRate">—</div><div class="s">失败请求单独统计</div></div>
+         <div class="card"><div class="k">Token</div><div class="v" id="traeMetricTokens">—</div><div class="s" id="traeMetricSplit">输入 / 输出 — / —</div></div>
+         <div class="card"><div class="k">平均延迟</div><div class="v" id="traeMetricLatency">—</div><div class="s">已完成请求</div></div>
+       </div>
+       <div class="trae-usage-columns">
+         <div><h3>按模型</h3><div id="traeUsageByModel" class="trae-usage-list"><div class="trae-empty">暂无 TRAE 调用记录</div></div></div>
+         <div><h3>按账号</h3><div id="traeUsageByAccount" class="trae-usage-list"><div class="trae-empty">暂无 TRAE 调用记录</div></div></div>
+       </div>
+       <div><h3>最近请求</h3><div id="traeUsageRecent" class="trae-recent"><div class="trae-empty">暂无 TRAE 调用记录</div></div></div>
+     </section>
     <section id="traeAccountsSection">
       <h2>TRAE 账号</h2>
       <div class="toolbar">
@@ -12164,6 +12234,98 @@ function traeSourceLabel(value){
   return traeText(labels[value] || '来源未标注');
 }
 
+function traeNumber(value){
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
+}
+
+function traeMetricLabel(value){
+  return traeNumber(value).toLocaleString(undefined, {maximumFractionDigits:0});
+}
+
+function renderTraeQuickExample(){
+  const base = (document.getElementById('traeConfigBaseUrl') || {}).textContent || (location.origin + '/v1');
+  const select = document.getElementById('traeQuickModel');
+  const model = select && select.value ? select.value : 'trae/deepseek-v4.1-flash';
+  const example = [
+    'curl ' + base + '/chat/completions \\',
+    '  -H "Content-Type: application/json" \\',
+    '  -H "Authorization: Bearer YOUR_GATEWAY_API_KEY" \\',
+    '  -d ' + JSON.stringify({model:model, messages:[{role:'user', content:'你好'}], stream:false}, null, 2)
+  ].join('\n');
+  const code = document.getElementById('traeCurlExample');
+  if(code) code.textContent = example;
+}
+
+function copyTraeCurl(){
+  const code = document.getElementById('traeCurlExample');
+  if(code) return copyTraeValue(code.textContent);
+}
+
+function renderTraeDiagnostics(data){
+  const accounts = data.accounts || [];
+  const models = data.models || [];
+  const client = data.client || {};
+  const native = accounts.some(a => a.nativeConnected === true) || models.some(m => m.source === 'native_client');
+  const legacy = accounts.some(a => a.catalogSource === 'legacy_http') || models.some(m => m.source === 'legacy_http');
+  const cache = accounts.some(a => a.catalogSource === 'local_client_cache') || models.some(m => m.source === 'local_client_cache');
+  let klass = 'ok', title = 'TRAE 原生目录已接入', detail = '当前模型目录来自官方 TRAE CN 原生客户端，可以继续使用最新模型。';
+  if(!client.installed){
+    klass = 'error'; title = '未检测到官方 TRAE CN';
+    detail = '网关只能显示兼容目录，无法读取最新模型。请在这台电脑安装并启动官方 TRAE CN，再重新扫描。';
+  }else if(legacy){
+    klass = 'warn'; title = '当前正在使用旧接口目录';
+    detail = '这不是旧安装目录，而是 TRAE CN 没有连接成功或登录账号不一致。启动 TRAE CN，登录与网关所选账号相同的账号后，点击“刷新额度 / 模型”。';
+  }else if(cache && !native){
+    klass = 'warn'; title = '当前使用本机缓存目录';
+    detail = '缓存只能证明本机曾经看到过这些模型。要获得最新目录，保持 TRAE CN 运行后重新刷新。';
+  }else if(!native){
+    klass = 'warn'; title = '尚未完成原生连接';
+    detail = '先运行 TRAE CN 并登录同一账号，再刷新模型目录。';
+  }
+  const box = document.getElementById('traeDiagnosis');
+  if(box) box.className = 'trae-diagnosis ' + klass;
+  if(box) box.innerHTML = '<div class="trae-diagnosis-title">' + esc(title) + '</div><div>' + esc(detail) + '</div>'
+    + '<div class="trae-note">客户端：<span data-no-i18n>' + esc(client.installed ? ('TRAE CN ' + (client.version || '版本未知')) : '未安装') + '</span> · 原生桥接：' + esc(client.nativeBridgeConfigured === true ? '已配置' : '未配置') + '</div>';
+  const chips = document.getElementById('traeCapabilities');
+  if(chips) chips.innerHTML = [
+    ['客户端', client.installed, client.installed ? '已检测' : '未检测'],
+    ['原生目录', native, native ? '已连接' : '未连接'],
+    ['视觉模型', models.some(m => m.supportsVision), models.some(m => m.supportsVision) ? '可用' : '未确认'],
+    ['工具桥接', models.some(m => m.route === 'native_client'), models.some(m => m.route === 'native_client') ? '可用' : '需原生模型']
+  ].map(item => '<span class="trae-chip ' + (item[1] ? 'ok' : 'warn') + '">' + esc(item[0]) + ' · ' + esc(item[2]) + '</span>').join('');
+}
+
+function renderTraeMetrics(metrics){
+  const value = metrics && metrics.summary ? metrics.summary : {};
+  const requests = traeNumber(value.requests), success = traeNumber(value.success);
+  const rate = typeof value.successRatePct === 'number' ? value.successRatePct.toLocaleString(undefined, {maximumFractionDigits:1}) + '%' : '—';
+  const byModel = Array.isArray(metrics && metrics.byModel) ? metrics.byModel : [];
+  const byAccount = Array.isArray(metrics && metrics.byAccount) ? metrics.byAccount : [];
+  const recent = Array.isArray(metrics && metrics.recent) ? metrics.recent : [];
+  const set = (id, text) => { const el = document.getElementById(id); if(el) el.textContent = text; };
+  set('traeMetricRequests', traeMetricLabel(requests));
+  set('traeMetricSuccess', '成功 ' + traeMetricLabel(success) + ' · 失败 ' + traeMetricLabel(value.errors));
+  set('traeMetricRate', rate);
+  set('traeMetricTokens', traeMetricLabel(value.totalTokens));
+  set('traeMetricSplit', '输入 / 输出 ' + traeMetricLabel(value.inputTokens) + ' / ' + traeMetricLabel(value.outputTokens));
+  set('traeMetricLatency', typeof value.avgLatencyMs === 'number' ? value.avgLatencyMs.toLocaleString() + ' ms' : '—');
+  const renderRows = (items, key, empty) => items.length ? items.slice(0, 8).map(item => {
+    const name = String(item[key] || '未知');
+    const detail = traeMetricLabel(item.requests) + ' 次 · ' + traeMetricLabel(item.tokens) + ' token';
+    return '<div class="trae-usage-row"><div><strong data-no-i18n>' + esc(name) + '</strong><small>' + esc(detail) + '</small></div><span class="badge ' + (item.errors ? 'off' : 'on') + '">' + esc(item.errors ? (item.errors + ' 失败') : '正常') + '</span></div>';
+  }).join('') : '<div class="trae-empty">' + esc(empty) + '</div>';
+  const modelBox = document.getElementById('traeUsageByModel');
+  if(modelBox) modelBox.innerHTML = renderRows(byModel, 'model', '暂无 TRAE 模型调用记录');
+  const accountBox = document.getElementById('traeUsageByAccount');
+  if(accountBox) accountBox.innerHTML = renderRows(byAccount, 'account', '暂无 TRAE 账号调用记录');
+  const recentBox = document.getElementById('traeUsageRecent');
+  if(recentBox) recentBox.innerHTML = recent.length ? recent.map(item => {
+    const time = traeTime(item.at) || '—';
+    const status = item.status === 'completed' ? '成功' : ('失败 ' + (item.errorCode || ''));
+    return '<div class="trae-recent-row"><span>' + esc(time) + '</span><code data-no-i18n>' + esc(item.model || 'unknown') + '</code><span>' + esc(status) + '</span></div>';
+  }).join('') : '<div class="trae-empty">暂无 TRAE 调用记录</div>';
+}
+
 function traeResultStatus(success){
   const accounts = TRAE_DATA ? TRAE_DATA.accounts : [];
   if(accounts.some(a => a.status === 'login_expired')){
@@ -12194,12 +12356,14 @@ function renderTraeProvider(data){
     models: (Array.isArray(data.models) ? data.models : []).filter(m => m && typeof m.id === 'string' && m.id.startsWith('trae/')).map(m => ({
       id:m.id, name:String(m.name || m.id), source:traeCatalogSource(m.source),
       route:['native_client','legacy_http'].includes(m.route) ? m.route : '',
-      streaming:['buffered','sse'].includes(m.streaming) ? m.streaming : ''
+      streaming:['buffered','sse'].includes(m.streaming) ? m.streaming : '',
+      supportsVision:m.supports_vision === true
     })),
     client: data.client && typeof data.client === 'object' ? {
       installed:!!data.client.installed, version:String(data.client.version || ''),
       nativeBridgeConfigured:typeof data.client.nativeBridgeConfigured === 'boolean' ? data.client.nativeBridgeConfigured : null
-    } : {}
+    } : {},
+    metrics: data.metrics && typeof data.metrics === 'object' ? data.metrics : {summary:{},byModel:[],byAccount:[],recent:[]}
   };
   const d = TRAE_DATA;
   const summary = traeSummary(d);
@@ -12213,6 +12377,15 @@ function renderTraeProvider(data){
   document.getElementById('traeNativeBridgeStatus').textContent = traeText(d.client.nativeBridgeConfigured === true
     ? '原生桥接已配置（非连接状态）' : d.client.nativeBridgeConfigured === false ? '原生桥接未配置' : '原生桥接状态未知');
   document.getElementById('traeBaseUrl').textContent = location.origin + '/v1';
+  document.getElementById('traeConfigBaseUrl').textContent = location.origin + '/v1';
+  const quick = document.getElementById('traeQuickModel');
+  if(quick){
+    quick.innerHTML = d.models.map(m => '<option value="' + esc(m.id) + '">' + esc(m.name) + (m.supportsVision ? ' · 视觉' : '') + '</option>').join('');
+    if(d.models.some(m => m.id === 'trae/deepseek-v4.1-flash')) quick.value = 'trae/deepseek-v4.1-flash';
+  }
+  renderTraeQuickExample();
+  renderTraeDiagnostics(d);
+  renderTraeMetrics(d.metrics);
   const statuses = {ready:'正常',active:'正常',enabled:'已启用',disabled:'已禁用',expired:'已过期',error:'错误',unknown:'未查询 / 已导入',imported:'未查询 / 已导入',
     partial:'部分查询失败',login_expired:'登录已失效',upstream_error:'上游服务错误',rate_limited:'请求受限'};
   document.getElementById('traeAccounts').innerHTML = d.accounts.length ? d.accounts.map((a, i) => {
@@ -12240,7 +12413,8 @@ function renderTraeProvider(data){
   document.getElementById('traeModels').innerHTML = d.models.length ? d.models.map((m, i) =>
     '<div class="trae-model"><div class="trae-model-info"><strong data-no-i18n>' + esc(m.name) + '</strong><div class="mono" data-no-i18n>' + esc(m.id) + '</div>'
     + '<div class="trae-note">' + esc(traeText(m.route === 'native_client' ? '原生文本桥接' : m.route === 'legacy_http' ? '旧接口' : '路由未标注'))
-    + (m.streaming ? ' · ' + esc(m.streaming === 'buffered' ? traeText('完成后缓冲返回 · 非逐 token') : 'SSE') : '') + '</div>'
+    + (m.streaming ? ' · ' + esc(m.streaming === 'buffered' ? traeText('完成后缓冲返回 · 非逐 token') : 'SSE') : '')
+    + (m.supportsVision ? ' · ' + esc(traeText('视觉')) : '') + '</div>'
     + '<div class="trae-note">' + esc(traeText('模型来源')) + ' · ' + esc(traeSourceLabel(m.source)) + '</div>'
     + (m.source === 'local_client_cache' ? '<div class="trae-note">' + esc(traeText('仅目录，需运行本机 TRAE')) + '</div>' : '') + '</div>'
     + '<button type="button" class="sec" onclick="copyTraeModel(' + i + ')" aria-label="复制模型 ID">复制</button></div>'

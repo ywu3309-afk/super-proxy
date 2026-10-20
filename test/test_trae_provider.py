@@ -118,6 +118,28 @@ class ProviderTests(unittest.TestCase):
         self.assertNotIn("refresh", json.dumps(self.provider._credentials(self.provider._get(account_id))))
         self.assertEqual(marker.read_text(), "unchanged")
 
+    def test_analytics_records_only_redacted_request_counters(self):
+        account_id = self.imported()
+        row = self.provider._get(account_id)
+        self.provider._record_request(
+            row, MODEL, self.payload, time.monotonic() - 0.025,
+            usage={"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18},
+        )
+        self.provider._record_request(
+            row, MODEL, {**self.payload, "_images": [{"mediaType": "image/png"}]},
+            time.monotonic() - 0.010, usage={}, outcome="error", error="image_upload_failed",
+        )
+        analytics = self.provider.analytics()
+        self.assertEqual(analytics["summary"]["requests"], 2)
+        self.assertEqual(analytics["summary"]["success"], 1)
+        self.assertEqual(analytics["summary"]["errors"], 1)
+        self.assertEqual(analytics["summary"]["totalTokens"], 18)
+        self.assertEqual(analytics["byModel"][0]["model"], MODEL)
+        self.assertEqual(analytics["byModel"][0]["vision"], 1)
+        text = json.dumps(analytics, ensure_ascii=False)
+        self.assertNotIn(TOKEN, text)
+        self.assertNotIn("image/png", text)
+
     def test_enable_disable_remove_has_recoverable_encrypted_backup(self):
         account_id = self.imported()
         self.assertFalse(self.provider.set_enabled(account_id, False)["accounts"][0]["enabled"])
