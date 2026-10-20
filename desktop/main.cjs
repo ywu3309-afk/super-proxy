@@ -385,7 +385,6 @@ if (!gotLock) {
         { label: '软件', submenu: [
           { label: `超级反代 v${app.getVersion()}`, enabled: false },
           { label: '检查桌面更新…', click: () => desktopUpdater.check(mainWindow) },
-          { label: '查看私人仓库发布页', click: () => shell.openExternal(`https://github.com/${metadata.updateRepository}/releases`) },
           { type: 'separator' },
           { label: '退出', click: () => { quitting = true; app.quit(); } }
         ] },
