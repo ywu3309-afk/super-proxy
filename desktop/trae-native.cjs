@@ -1,6 +1,7 @@
 const { createServer } = require('node:http');
 const { randomBytes, timingSafeEqual } = require('node:crypto');
 const { execFile } = require('node:child_process');
+const fs = require('node:fs');
 const path = require('node:path');
 
 const MAX_BODY = 1024 * 1024;
@@ -90,19 +91,39 @@ function traeExecutableCandidates(env = process.env) {
   return [...new Set(candidates)];
 }
 
+function isOfficialTraeExecutable(executablePath) {
+  if (typeof executablePath !== 'string' || !executablePath) return false;
+  try {
+    const productPath = path.join(path.dirname(executablePath), 'resources', 'app', 'product.json');
+    const product = JSON.parse(fs.readFileSync(productPath, 'utf8'));
+    return product && (product.nameShort === 'Trae CN' || product.applicationName === 'trae-cn' ||
+      product.win32AppUserModelId === 'ByteDance.TraeCN');
+  } catch {
+    return false;
+  }
+}
+
 async function discoverTrae() {
   if (process.platform !== 'win32') throw failure('TRAE_NOT_RUNNING');
   const expected = traeExecutableCandidates();
   if (!expected.length) throw failure('TRAE_NOT_RUNNING');
   const escaped = expected.map((value) => `'${value.replace(/'/g, "''")}'`).join(',');
-  const rows = await powershell(`$ErrorActionPreference='Stop'; @(
+  const query = (filter) => powershell(`$ErrorActionPreference='Stop'; @(
     Get-CimInstance Win32_Process | Where-Object {
-      $_.ExecutablePath -and @(${escaped}) -icontains $_.ExecutablePath
+      ${filter}
     } | Select-Object ProcessId, ParentProcessId, ExecutablePath,
       @{Name='HasType';Expression={ [bool]($_.CommandLine -match '--type=') }}
   ) | ConvertTo-Json -Compress`);
-  const list = Array.isArray(rows) ? rows : [rows];
-  return selectOfficialTraeRoot(list, expected);
+  let rows = await query(`$_.ExecutablePath -and @(${escaped}) -icontains $_.ExecutablePath`);
+  let list = (Array.isArray(rows) ? rows : [rows]).filter((row) => isOfficialTraeExecutable(row?.ExecutablePath));
+  // TRAE may be installed in a user-selected directory.  In that case the
+  // product marker, not a guessed path, is the authoritative identity.
+  if (!list.length) {
+    rows = await query(`$_.Name -ieq 'Trae CN.exe'`);
+    list = (Array.isArray(rows) ? rows : [rows]).filter((row) => isOfficialTraeExecutable(row?.ExecutablePath));
+  }
+  if (!list.length) throw failure('TRAE_NOT_RUNNING');
+  return selectOfficialTraeRoot(list, list.map((row) => row.ExecutablePath));
 }
 
 function selectOfficialTraeRoot(rows, expected) {

@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
 const { compareVersions, selectRelease, validateManifest } = require('../desktop/updater.cjs');
-const { downloadAsset, readManifest } = require('../desktop/github.cjs');
+const { apiJSON, downloadAsset, readManifest } = require('../desktop/github.cjs');
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 mkdirSync(join(root, 'analysis'), { recursive: true });
 const temp = mkdtempSync(join(root, 'analysis', 'desktop-update-test-'));
@@ -62,6 +62,19 @@ test('downloading verifies the actual content and never forwards auth to the ass
     assert.deepEqual(readFileSync(target), bytes);
     assert.equal(calls[0].hasAuth, true);
     assert.equal(calls[1].hasAuth, false);
+  } finally { globalThis.fetch = original; }
+});
+test('public GitHub updates do not require or send an authorization header', async () => {
+  const original = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, hasAuth: !!options.headers.Authorization });
+    return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+  try {
+    assert.deepEqual(await apiJSON(repository, '/releases?per_page=30', ''), { ok: true });
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].hasAuth, false);
   } finally { globalThis.fetch = original; }
 });
 test('a redirect outside GitHub is refused before contacting the new host', async () => {

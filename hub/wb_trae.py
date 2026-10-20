@@ -540,7 +540,40 @@ class TraeProvider:
                               Path(base) / "Trae CN/resources/app"):
                 if candidate not in roots:
                     roots.append(candidate)
+        if os.name == "nt":
+            try:
+                import winreg
+                uninstall_roots = (
+                    (winreg.HKEY_CURRENT_USER, r"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall"),
+                    (winreg.HKEY_LOCAL_MACHINE, r"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall"),
+                    (winreg.HKEY_LOCAL_MACHINE, r"Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall"),
+                )
+                for hive, key_path in uninstall_roots:
+                    try:
+                        with winreg.OpenKey(hive, key_path) as uninstall:
+                            for index in range(winreg.QueryInfoKey(uninstall)[0]):
+                                try:
+                                    with winreg.OpenKey(uninstall, winreg.EnumKey(uninstall, index)) as entry:
+                                        display = winreg.QueryValueEx(entry, "DisplayName")[0]
+                                        if not isinstance(display, str) or "trae" not in display.lower() or "cn" not in display.lower():
+                                            continue
+                                        install = winreg.QueryValueEx(entry, "InstallLocation")[0]
+                                        if isinstance(install, str) and install:
+                                            roots.append(Path(install) / "resources/app")
+                                        icon = winreg.QueryValueEx(entry, "DisplayIcon")[0]
+                                        if isinstance(icon, str) and icon:
+                                            roots.append(Path(icon.split(",", 1)[0]).parent / "resources/app")
+                                except (OSError, ValueError, TypeError):
+                                    continue
+                    except (OSError, ValueError, TypeError):
+                        continue
+            except (ImportError, OSError, ValueError, TypeError):
+                pass
+        unique = []
         for root in roots:
+            if root not in unique:
+                unique.append(root)
+        for root in unique:
             try:
                 product = json.loads((root / "product.json").read_text(encoding="utf-8"))
                 version = product.get("appVersion")

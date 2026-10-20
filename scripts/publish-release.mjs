@@ -31,7 +31,7 @@ const head = git('rev-parse', 'HEAD');
 if (manifest.commit !== head) throw new Error('The release was built from a different source commit; rebuild before publishing');
 if (git('rev-parse', `${tag}^{}`) !== head) throw new Error('The version tag must identify the current commit');
 if (git('remote', 'get-url', 'origin') !== `https://github.com/${repository}.git`) throw new Error('Origin must be the configured private repository');
-const token = loadToken(repository);
+const token = loadToken(repository, { required: true });
 const repo = await apiJSON(repository, '', token);
 if (!repo.permissions?.push) throw new Error('Publishing requires repository write permission');
 // 复用已授权的官方 API 核验远端标签，不依赖另一条 github.com Git 传输链路。

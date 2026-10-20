@@ -9,7 +9,7 @@ const REPOSITORY_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const ASSET_HEADERS_TIMEOUT_MS = 30000;
 const ASSET_IDLE_TIMEOUT_MS = 180000;
 
-function loadToken(repository) {
+function loadToken(repository, { required = false } = {}) {
   if (!REPOSITORY_RE.test(repository)) throw new Error('更新仓库配置无效');
   const supplied = (process.env.GH_TOKEN || process.env.GITHUB_TOKEN || '').trim();
   if (supplied) return supplied;
@@ -23,15 +23,17 @@ function loadToken(repository) {
     const line = output.split(/\r?\n/).find((value) => value.startsWith('password='));
     if (line && line.slice(9)) return line.slice(9);
   } catch { /* 凭据输出和错误不进入日志或渲染进程。 */ }
-  throw new Error('私人仓库需要本机 GitHub 授权。请先使用 Git Credential Manager 登录 GitHub，再检查更新。不要将 Token 写入软件。');
+  if (!required) return '';
+  throw new Error('发布操作需要 GitHub 写权限。请使用 Git Credential Manager 或 GH_TOKEN 授权；不要将 Token 写入软件。');
 }
 
 async function apiJSON(repository, suffix, token, options = {}) {
   if (!REPOSITORY_RE.test(repository) || (suffix !== '' && !suffix.startsWith('/'))) throw new Error('GitHub 请求配置无效');
+  const headers = { 'User-Agent': 'SuperProxy-Desktop-Updater', Accept: 'application/vnd.github+json' };
+  if (token) headers.Authorization = `Bearer ${token}`;
   const response = await fetch(`https://api.github.com/repos/${repository}${suffix}`, {
     method: options.method || 'GET', redirect: 'error',
-    headers: { 'User-Agent': 'SuperProxy-Desktop-Updater', Accept: 'application/vnd.github+json',
-      Authorization: `Bearer ${token}`, ...(options.body ? { 'Content-Type': 'application/json' } : {}) },
+    headers: { ...headers, ...(options.body ? { 'Content-Type': 'application/json' } : {}) },
     body: options.body ? JSON.stringify(options.body) : undefined,
     signal: AbortSignal.timeout(30000)
   }).catch(() => { throw new Error('GitHub 网络请求失败，请检查网络后重试'); });
@@ -59,7 +61,7 @@ async function assetResponse(repository, assetId, token) {
       throw new Error('更新下载地址不属于 GitHub，已停止');
     }
     const headers = { 'User-Agent': 'SuperProxy-Desktop-Updater', Accept: 'application/octet-stream' };
-    if (api) headers.Authorization = `Bearer ${token}`;
+    if (api && token) headers.Authorization = `Bearer ${token}`;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), ASSET_HEADERS_TIMEOUT_MS);
     let response;

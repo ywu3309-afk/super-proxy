@@ -1,5 +1,12 @@
 # 更新记录
 
+## 1.2.8（公开仓库免登录自动更新）
+
+- 公开 GitHub 仓库的桌面更新不再强制读取 GitHub 凭据，可直接读取 Release、更新清单和公开附件。
+- 只有发布新版本时才要求 GitHub 写权限；更新下载仍校验 Release 资产大小和 SHA-256。
+- 更新提示改为公开 GitHub Release，不再显示“私人仓库需要授权”。
+- TRAE 原生桥接增加 `product.json` 产品标识兜底，可识别用户自定义安装目录中的官方 TRAE CN。
+
 ## 1.2.7（TRAE CN 安装路径兼容）
 
 - TRAE 原生桥接同时识别用户安装目录和系统安装目录，不再只检查单一的 `%LOCALAPPDATA%\\Programs\\Trae CN` 路径。

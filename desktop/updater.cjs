@@ -65,7 +65,7 @@ function createUpdater({ app, dialog, repository, runtimeRoot, getGateway, befor
       const asset = validateManifest(manifest, release, repository);
       const choice = await dialog.showMessageBox(window, { type: 'question', title: '发现桌面更新',
         message: `v${app.getVersion()} → v${manifest.version}`,
-        detail: '从你自己的 GitHub 私人仓库下载并校验 SHA-256，然后重启软件。账号、密钥、设置和用量数据保留；上一版程序保留用于回滚。',
+        detail: '从 GitHub Release 下载并校验 SHA-256，然后重启软件。账号、密钥、设置和用量数据保留；上一版程序保留用于回滚。',
         buttons: ['下载并重启更新', '稍后'], defaultId: 1, cancelId: 1, noLink: true });
       if (choice.response !== 0) return;
       const updateRoot = path.join(path.dirname(runtimeRoot), '.super-proxy-updates');
