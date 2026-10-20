@@ -57,14 +57,14 @@ Python 网关的控制面板（`dashboard.html`）含 8 大页：
 
 打开面板后点「Login new account」即可扫码建号，账号自动落盘到 `data/accounts/`。
 
-### TRAE CN（v1.2.3）
+### TRAE CN（v1.2.4）
 
 - TRAE 使用独立的 `data/trae/` 账号池，不与 WorkBuddy 账号、额度或路由混用。
 - 「扫描本机 TRAE」只读取 TRAE 自己的登录存储，复制当前访问令牌、UID 和有效期到本项目的 Windows DPAPI 保护文件；不接管刷新令牌、设备私钥，也不修改 TRAE 安装目录。
 - 额度接口保留小数并显示为账号积分池参考值；具体模型权益以 TRAE 返回结果为准。
 - 模型以 `trae/<upstream-model-id>` 暴露，目录动态来自当前客户端原生 `model_list_by_function` 的 `chat_v3` 分组；不把固定模型别名冒充最新模型。旧五模型 HTTP 目录只用于兼容回退。
 - **新模型需从桌面程序启动网关，并保持官方 TRAE CN 正在运行、打开一个工作窗口、登录与网关所选账号相同的账号。** 先“扫描本机 TRAE”，再“刷新额度 / 模型”。逐次校验 UID，不会把其它已导入账号的调用计费到当前登录账号。
-- Chat Completions 支持普通响应与**缓冲 SSE**：完整对话序列化为带角色的文本交给原生客户端，确认实际模型和正常结束后输出；不是原生逐 token 透传。支持 `developer` 文本角色（映射为 system）及 `max_completion_tokens` 限额别名；图片、音频和 `response_format` 尚不支持，原生路由不接受 `temperature/top_p`，不会静默忽略采样参数。
+- Chat Completions 支持普通响应与**缓冲 SSE**：完整对话序列化为带角色的文本交给原生客户端，确认实际模型和正常结束后输出；不是原生逐 token 透传。支持 `developer` 文本角色（映射为 system）及 `max_completion_tokens` 限额别名。v1.2.4 仅为精确 `trae/deepseek-v4.1-flash` 接通 user 图片，要求原生目录明确支持；音频和 `response_format` 尚不支持，原生路由不接受 `temperature/top_p`，不会静默忽略采样参数。
 - 原生新模型支持 **structured-text 工具协议桥**：接收 `tools`、`tool_choice`、`parallel_tool_calls`、`assistant.tool_calls` 和 `tool/tool_call_id` 历史，将模型的结构化文本和严格 JSON 参数转换为 OpenAI 工具调用及 `finish_reason=tool_calls`。工具只由 DSH 等调用方执行，绝不在 TRAE 中执行；这不是 TRAE 原生 function calling。旧 HTTP 模型不冒充支持工具。
 - 工具桥逐次核对随机响应标记、工具名称、参数 JSON、调用策略和常见 JSON Schema 子集；无效输出显式失败，不重放或把工具调用降成普通文字。`strict=true` 遇到未支持的 schema 关键字（例如 `$ref/$defs`）返回 `unsupported_tool_schema`，不宣称完整 JSON Schema 支持。工具定义、历史和正文共同受原生上下文与本地输出限额约束。
 - v1.2.3 对下表三个精确 TRAE DeepSeek 路由使用 `framed_json_v2`：`WB_TOOL_BRIDGE_V2` 首标记、`WB_CONTENT` JSON 字符串或 null、成对的 `WB_CALL/WB_ARGS`，以及带同一完整随机标记的 `WB_END`。每个 JSON 字段独占一行，字符串内换行须转义；普通聊天也使用完整帧，最终对外只返回正常正文或 OpenAI 工具调用。`WB_END` 完整后才允许固定字面 `WB_PAD 0000000000000000` 的完整或截短前缀，用来承接已观察到的原生 summary 末尾丢字符。不补齐任何语义帧、nonce 或参数，不接受残缺帧的普通文本回退，不重放；元数据标注 `framed_json_v2`。其它模型保留下面的 envelope 兼容行为。
@@ -91,7 +91,7 @@ Python 网关的控制面板（`dashboard.html`）含 8 大页：
 
 目录可用不代表三个模型均已完成工具任务验收。后续目录以当前账号刷新结果为准，不通过改名或切换成其他模型伪装成功。
 
-**DSH 图片识别使用 WorkBuddy 通道，不要与 TRAE 同名模型混淆。** WorkBuddy 分组中的 `deepseek-v4.1-flash`（没有 `trae/` 前缀）已于 2026-10-20 用随机四色四形、无文字图片完成真实视觉验证。网关保留 OpenAI `image_url` 图片块；DSH 自定义模型还必须显式声明 `input: [text, image]`，仅有 `supportsVision` 不会通过桌面图片准入检查。v1.2.3 的一键配置器已补齐明确声明的输入模态；缺失或相互冲突的能力声明保持纯文本。此配置修复不是给纯文本模型增加视觉能力；当前 TRAE 桥仍只接收文本，不应为它手工开启图片。
+**WorkBuddy 与 TRAE 同名模型是独立通道。** WorkBuddy 分组中的 `deepseek-v4.1-flash`（没有 `trae/` 前缀）已完成无文字随机四色四形图的真实视觉验证。v1.2.4 的 `trae/deepseek-v4.1-flash` 也已通过独立原生 signed 上传及识图测试，不借用 WorkBuddy 的结果。TRAE 图片支持 OpenAI `image_url` 内联 PNG/JPEG/WebP dataURI，最多 4 张、单张 4 MiB、解码合计 8 MiB，像素不超过 40,000,000；不拉取远程 URL。图片独立上传并按完整历史顺序绑定，Base64 不进入工具文本。DSH 自定义模型须显式声明 `input: [text, image]`；一键配置器只从网关明确能力生成输入模态，缺失、缓存、未实现或冲突能力仍保留纯文本。其它 TRAE 模型不可按同名或厂商推断开启图片。
 
 已有 DSH `wb-gateway` 配置中的目标模型应包含（保留既有 provider、凭据引用和其它规格）：
 
@@ -111,7 +111,7 @@ compat:
   maxTokensField: max_tokens
 ```
 
-不要发送 `temperature/top_p`、图片或结构化响应模式；客户端超时应允许缓冲返回（如 180 秒）。工具描述和执行结果按 JSON 保留，由客户端自己的权限/审批和工作目录约束工具执行。调用链为：DSH 定义工具 → TRAE 生成工具协议文本 → 网关返回 `tool_calls` → DSH 执行 → 回传 `tool` 结果 → 模型继续回答。
+不要发送 `temperature/top_p` 或结构化响应模式；仅已声明支持图片的精确 TRAE 路由接受 user 图片。客户端超时应允许缓冲返回（如 180 秒）。工具描述和执行结果按 JSON 保留，由客户端自己的权限/审批和工作目录约束工具执行。调用链为：DSH 定义工具 → TRAE 生成工具协议文本 → 网关返回 `tool_calls` → DSH 执行 → 回传 `tool` 结果 → 模型继续回答。
 
 ## 账号与数据
 
