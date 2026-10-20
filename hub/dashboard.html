@@ -462,11 +462,52 @@ a:hover{text-decoration:underline}
 .realm-card.gateway-ctrl:hover{transform:none;border-color:var(--line);box-shadow:var(--shadow)}
 .toggle-realm-btn{
   background:var(--panel);border:1px solid var(--accent);color:var(--accent);
-  padding:8px 18px;font-size:13px;font-weight:600;border-radius:8px;box-shadow:var(--shadow-sm);cursor:pointer;
+  min-height:42px;padding:9px 18px;font-size:13px;font-weight:700;border-radius:9px;
+  box-shadow:0 0 0 1px rgba(34,211,238,.12),0 0 18px rgba(34,211,238,.10),var(--shadow-sm);cursor:pointer;
   transition:all .15s ease;
 }
-.toggle-realm-btn:hover{background:var(--panel2);box-shadow:var(--shadow-md)}
+.toggle-realm-btn:hover{background:var(--panel2);box-shadow:0 0 0 1px rgba(34,211,238,.22),0 0 24px rgba(34,211,238,.18),var(--shadow-md)}
+.gateway-ctrl .gateway-control-kicker{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+.gateway-ctrl .gateway-control-kicker::before{content:"";width:8px;height:8px;border-radius:50%;background:var(--accent2);box-shadow:0 0 10px var(--accent2);flex:0 0 auto}
+.gateway-ctrl .gateway-control-note{margin:0 0 12px;color:var(--dim);font-size:11px;line-height:1.55}
+/* Keep China and Global as two clearly separated account panels. The gateway
+   switch gets its own full-width rail so it cannot be mistaken for either
+   account pool. */
+@media (min-width:721px){
+  .realm-cards-grid{grid-template-columns:repeat(2,minmax(0,1fr))!important}
+  .realm-cards-grid .gateway-ctrl{grid-column:1 / -1}
+}
+.realm-cards-grid #tabCn{order:-2}
+.realm-cards-grid #tabIntl{order:-1}
+.realm-cards-grid .gateway-ctrl{order:0}
+@media (max-width:720px){
+  .gateway-ctrl .gateway-control-note{margin-bottom:10px}
+  .toggle-realm-btn{min-height:44px}
+}
 .realm-endpoint-info{font-size:12px;color:var(--dim)}
+.settings-quickbar{
+  display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;
+  margin:0 0 16px;padding:12px 14px;border:1px solid var(--line);
+  border-left:3px solid var(--accent);border-radius:12px;background:var(--panel2);
+  box-shadow:var(--shadow-sm)
+}
+.settings-quickbar-copy{min-width:220px;flex:1}
+.settings-quickbar-title{font-size:13px;font-weight:700;color:var(--fg)}
+.settings-quickbar-note{margin-top:3px;font-size:11px;line-height:1.5;color:var(--dim)}
+.settings-advanced-toggle{min-height:36px;padding:8px 14px!important;border-radius:9px!important;
+  background:var(--panel)!important;border:1px solid var(--accent)!important;color:var(--accent)!important;
+  font-weight:700!important;box-shadow:0 0 14px rgba(34,211,238,.10)!important}
+.settings-advanced-toggle:hover{background:var(--accent-soft)!important;border-color:var(--accent-hover)!important}
+.settings-advanced-hidden{display:none!important}
+html[data-theme-style="cyber"] .settings-quickbar{
+  background:linear-gradient(100deg,rgba(8,25,45,.92),rgba(12,31,58,.62));
+  border-color:rgba(56,189,248,.26);border-left-color:var(--accent);
+  box-shadow:0 0 0 1px rgba(34,211,238,.08),0 0 22px rgba(34,211,238,.08)
+}
+html[data-theme-style="cyber"] .settings-advanced-toggle{
+  color:#b9f4ff!important;border-color:rgba(34,211,238,.58)!important;
+  background:rgba(8,25,45,.8)!important
+}
 
 .main-nav{display:inline-flex;gap:4px;background:var(--panel2);padding:4px;border-radius:10px;border:1px solid var(--line)}
 .main-nav-btn{background:transparent;border:1px solid transparent;color:var(--dim);padding:6px 14px;border-radius:7px;font-size:13px;font-weight:500;cursor:pointer;display:inline-flex;align-items:center;gap:6px;transition:all .15s ease}
@@ -3252,16 +3293,20 @@ html[data-theme-style="cyber"] .dot{animation:cyberPulse 2.4s ease-in-out infini
     <h2 id="gatewayPageTitle" style="margin:0;font-size:17px;color:var(--fg);font-family:var(--serif);font-weight:600;letter-spacing:.02em">网关与账号</h2>
     <div id="gatewayPageDesc" style="font-size:12px;color:var(--dim);margin-top:4px">管理账号池与代理出口，查看当日调用量、估算花费、成功率、最近请求与网关模型清单。</div>
   </div>
-  <!-- 版本中枢控制栏 (三列等高对齐网格) -->
+  <!-- 版本中枢控制栏：国内版 / 国际版分区展示，默认出口单独放在下方。 -->
+  <div class="realm-overview-label" style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin:0 0 8px;flex-wrap:wrap">
+    <span style="font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--dim)">出口账户分区</span>
+    <span style="font-size:11px;color:var(--dim)">国内版与国际版独立统计、独立账号池</span>
+  </div>
   <div class="realm-cards-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;margin-bottom:18px">
     
     <!-- 卡片 1: 国际版 (Global) -->
-    <div id="tabIntl" class="realm-card active" onclick="switchViewRealm('intl')">
+    <div id="tabIntl" class="realm-card" onclick="switchViewRealm('intl')">
       <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:8px">
         <span class="realm-badge-intl">国际版 (Global)</span>
         <span class="mono" style="font-size:11px;color:var(--dim)">www.workbuddy.ai</span>
         <span id="tabIntlDefaultBadge" class="badge ok mini" style="font-weight:600;display:none">默认出口</span>
-        <span id="tabIntlViewBadge" class="badge s mini" style="display:inline-block">当前视图</span>
+        <span id="tabIntlViewBadge" class="badge s mini" style="display:none">当前视图</span>
       </div>
       <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:8px;flex-wrap:wrap">
         <div class="credit-summary" style="display:flex;align-items:baseline;gap:5px;flex-wrap:wrap;min-width:0">
@@ -3273,12 +3318,12 @@ html[data-theme-style="cyber"] .dot{animation:cyberPulse 2.4s ease-in-out infini
     </div>
 
     <!-- 卡片 2: 国内版 (China) -->
-    <div id="tabCn" class="realm-card" onclick="switchViewRealm('cn')">
+    <div id="tabCn" class="realm-card active" onclick="switchViewRealm('cn')">
       <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:8px">
         <span class="realm-badge-cn">国内版 (China)</span>
         <span class="mono" style="font-size:11px;color:var(--dim)">copilot.tencent.com</span>
         <span id="tabCnDefaultBadge" class="badge ok mini" style="font-weight:600;display:none">默认出口</span>
-        <span id="tabCnViewBadge" class="badge warn mini" style="display:none">当前视图</span>
+        <span id="tabCnViewBadge" class="badge warn mini" style="display:inline-block">当前视图</span>
       </div>
       <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:8px;flex-wrap:wrap">
         <div class="credit-summary" style="display:flex;align-items:baseline;gap:5px;flex-wrap:wrap;min-width:0">
@@ -3292,16 +3337,17 @@ html[data-theme-style="cyber"] .dot{animation:cyberPulse 2.4s ease-in-out infini
     <!-- 卡片 3: 网关出口控制 -->
     <div id="cardGatewayCtrl" class="realm-card gateway-ctrl" style="cursor:default">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
-        <span style="font-size:11px;font-weight:700;color:var(--dim);text-transform:uppercase;letter-spacing:.5px">网关默认出口</span>
+        <span class="gateway-control-kicker" style="font-size:11px;font-weight:700;color:var(--dim);text-transform:uppercase;letter-spacing:.5px">网关默认出口</span>
         <span id="activeGatewayKeyCount" class="badge ok mini" style="font-weight:600">0 个 Key 生效</span>
       </div>
       <div style="display:flex;align-items:center;gap:8px;margin:2px 0 8px">
         <span id="gatewayDot" class="dot" style="width:9px;height:9px"></span>
-        <span id="activeGatewayName" style="font-size:20px;font-weight:700;color:var(--accent);letter-spacing:-.4px">国际版 (Global)</span>
+        <span id="activeGatewayName" style="font-size:22px;font-weight:800;color:var(--bad);letter-spacing:-.4px">国内版 (China)</span>
       </div>
+      <p class="gateway-control-note">所有未绑定专属出口的请求都会走这里。当前默认是国内版；需要访问国际版模型时，再用下面的醒目按钮切换。</p>
       <div style="margin-top:auto">
-        <button class="toggle-realm-btn" id="btnToggleRealm" onclick="toggleActiveGatewayRealm()" style="cursor:pointer;width:100%;padding:7px 12px;font-size:12px">
-          ⇄ 切换默认出口为【国内版】
+        <button class="toggle-realm-btn" id="btnToggleRealm" type="button" onclick="toggleActiveGatewayRealm()" aria-label="切换网关默认出口" title="切换所有未绑定专属出口的请求所使用的默认上游" style="cursor:pointer;width:100%;padding:7px 12px;font-size:12px">
+          ⇄ 切换默认出口为【国际版】
         </button>
       </div>
     </div>
@@ -3968,7 +4014,16 @@ html[data-theme-style="cyber"] .dot{animation:cyberPulse 2.4s ease-in-out infini
   <div id="pageSettings" class="main-page">
     <div style="margin-bottom:16px">
       <h2 style="margin:0;font-size:17px;color:var(--fg);font-family:var(--serif);font-weight:600;letter-spacing:.02em">网关设置</h2>
-      <div style="font-size:12px;color:var(--dim);margin-top:4px">面板密码与界面语言、API Key 与出口绑定、代理槽与限额、价格估算、出站身份与本地网络工具。</div>
+      <div style="font-size:12px;color:var(--dim);margin-top:4px">常用设置直接显示；价格、探针、日志和网络工具等高级项目默认收起，避免面板过长、选项混在一起。</div>
+    </div>
+
+    <div class="settings-quickbar" role="region" aria-label="设置显示方式">
+      <div class="settings-quickbar-copy">
+        <div class="settings-quickbar-title">常用设置</div>
+        <div class="settings-quickbar-note">密码、语言、页签、API Key、代理槽和账号限额保留在当前页面；不常改的运行策略放到高级设置。</div>
+      </div>
+      <button type="button" id="settingsAdvancedToggle" class="settings-advanced-toggle"
+              aria-expanded="false" onclick="toggleAdvancedSettings()">展开高级设置</button>
     </div>
 
     <!-- 左侧导航由 initPageNav() 扫描本页的 section 自动生成，
@@ -5099,8 +5154,8 @@ async function pollLogin(){
 }
 
 
-window.ACTIVE_GATEWAY_REALM = "intl";
-window.VIEW_REALM = "intl";
+window.ACTIVE_GATEWAY_REALM = "cn";
+window.VIEW_REALM = "cn";
 window.REALM_FILTER = "all";
 window.MODELS_DATA = [];
 window.ACCOUNTS = [];
@@ -9204,6 +9259,7 @@ async function refreshInner(gen){
    与上次选择定好 .active），switchMainTab() 那次会因清单未变直接返回，
    不会重建、也不会闪。 */
 document.addEventListener('DOMContentLoaded', function(){
+  applySettingsDensity();
   initPageNav(document.querySelector('.main-page.active'));
 });
 
@@ -9916,6 +9972,48 @@ function pageVisibilityItem(row){
   item.appendChild(box);
   item.appendChild(text);
   return item;
+}
+
+/* 设置页默认只显示常用区块；不常改的策略、探针、日志和网络项仍保留，
+   由顶部按钮展开。隐藏只影响面板显示，不影响后端设置或轮询。 */
+const SETTINGS_ADVANCED_PREF = 'WB_SETTINGS_ADVANCED_OPEN';
+let SETTINGS_ADVANCED_OPEN = false;
+try { SETTINGS_ADVANCED_OPEN = localStorage.getItem(SETTINGS_ADVANCED_PREF) === '1'; } catch(e){}
+function settingsSectionTitle(section){
+  const h2 = section && section.querySelector ? section.querySelector('h2') : null;
+  return h2 ? (h2.textContent || '').replace(/\s+/g, ' ').trim().replace(/\s*\([^)]*\)\s*$/, '') : '';
+}
+function settingsTopLevelSections(page){
+  if(!page) return [];
+  return Array.from(page.querySelectorAll('section')).filter(function(sec){
+    for(let p = sec.parentElement; p && p !== page; p = p.parentElement){
+      if(p.tagName === 'SECTION') return false;
+    }
+    return true;
+  });
+}
+function applySettingsDensity(){
+  const page = document.getElementById('pageSettings');
+  if(!page) return;
+  const sections = settingsTopLevelSections(page);
+  let advanced = false;
+  sections.forEach(function(section){
+    const title = settingsSectionTitle(section);
+    if(title === '模型价格估算') advanced = true;
+    section.classList.toggle('settings-advanced-hidden', advanced && !SETTINGS_ADVANCED_OPEN);
+  });
+  const btn = document.getElementById('settingsAdvancedToggle');
+  if(btn){
+    btn.textContent = SETTINGS_ADVANCED_OPEN ? '收起高级设置' : '展开高级设置';
+    btn.setAttribute('aria-expanded', SETTINGS_ADVANCED_OPEN ? 'true' : 'false');
+  }
+  page.classList.toggle('settings-advanced-open', SETTINGS_ADVANCED_OPEN);
+  if(typeof refreshPageNav === 'function') setTimeout(refreshPageNav, 0);
+}
+function toggleAdvancedSettings(){
+  SETTINGS_ADVANCED_OPEN = !SETTINGS_ADVANCED_OPEN;
+  try { localStorage.setItem(SETTINGS_ADVANCED_PREF, SETTINGS_ADVANCED_OPEN ? '1' : '0'); } catch(e){}
+  applySettingsDensity();
 }
 
 /* 重建只在清单变了的时候做：其余情况只同步勾选状态，免得每次 loadSettings 都把

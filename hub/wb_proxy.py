@@ -175,7 +175,10 @@ def port_owner_hint(port):
     if IS_WINDOWS:
         return "netstat -ano | findstr :%d" % port
     return "lsof -nP -iTCP:%d -sTCP:LISTEN" % port
-CURRENT_REALM = os.environ.get("WB_PROXY_DEFAULT_REALM", "intl")
+# Domestic/China is the safe first-run default. An explicit environment value
+# or a persisted active_realm.json still wins for operators who already chose
+# an exit; this only changes a fresh data directory with no prior choice.
+CURRENT_REALM = os.environ.get("WB_PROXY_DEFAULT_REALM", "cn")
 def detect_model_realm(model_id):
     if not model_id:
         return CURRENT_REALM
