@@ -23,6 +23,9 @@ import urllib.parse
 import urllib.request
 import uuid
 
+from wb_trae_catalog import read_local_model_catalog
+from wb_trae_native import NativeTraeClient, NativeBridgeError
+
 
 class TraeError(Exception):
     def __init__(self, status, message, code="trae_error"):
@@ -324,13 +327,16 @@ def _decode_event(event, lines):
 
 
 class TraeProvider:
-    def __init__(self, data_root, *, opener=None, protector=None, local_reader=None):
+    def __init__(self, data_root, *, opener=None, protector=None, local_reader=None,
+                 native_client=None, catalog_reader=None):
         self.root = Path(data_root).resolve() / "trae"
         self._lock = threading.RLock()
         self._account_locks = {}
         self._opener = opener or urllib.request.build_opener(_NoRedirect())
         self._protector = protector or _dpapi
         self._local_reader = local_reader or read_local_account
+        self._native = native_client if native_client is not None else NativeTraeClient()
+        self._catalog_reader = catalog_reader or read_local_model_catalog
         self._cursor = 0
 
     def _records(self):
@@ -424,17 +430,28 @@ class TraeProvider:
                     "lastError": "TRAE 登录已失效，请在 TRAE 内刷新后重新同步。" if expired else row.get("lastError"), "updatedAt": row.get("updatedAt"),
                     "expiresAt": row.get("expiresAt"), "creditDetails": row.get("creditDetails", []),
                     "cooldownUntil": row.get("cooldownUntil"),
-                    "quotaError": row.get("quotaError"), "modelError": row.get("modelError")})
+                    "quotaError": row.get("quotaError"), "modelError": row.get("modelError"),
+                    "catalogSource": row.get("catalogSource", "legacy_http"),
+                    "catalogFetchedAt": row.get("catalogFetchedAt"),
+                    "catalogAgeSeconds": max(0, time.time() - row["catalogFetchedAt"])
+                        if _finite_number(row.get("catalogFetchedAt")) else None,
+                    "nativeConnected": row.get("nativeConnected") is True,
+                    "nativeError": row.get("nativeError")})
                 if row.get("enabled"):
                     for model in row.get("models", []):
                         if isinstance(model, dict) and _MODEL.fullmatch(model.get("upstreamId", "")):
                             mid = "trae/" + model["upstreamId"]
-                            models[mid] = {"id": mid, "name": model.get("name") or model["upstreamId"]}
+                            models[mid] = {"id": mid, "name": model.get("name") or model["upstreamId"],
+                                "route": model.get("route", "legacy_http"),
+                                "source": model.get("source", row.get("catalogSource", "legacy_http")),
+                                "streaming": "buffered" if model.get("route") == "native_client" else "sse"}
             return {"provider": "trae", "accounts": accounts, "models": list(models.values()),
-                    "client": self._client(), "creditsScope": "account_pool_not_model_entitlement"}
+                    "client": {**self._client(), "nativeBridgeConfigured": bool(getattr(self._native, "configured", False))},
+                    "creditsScope": "account_pool_not_model_entitlement"}
 
     def models(self):
-        return [{"id": m["id"], "object": "model", "owned_by": "trae", "name": m["name"]}
+        return [{"id": m["id"], "object": "model", "owned_by": "trae", "name": m["name"],
+                 "route": m["route"], "streaming": m["streaming"], "source": m["source"]}
                 for m in self.status()["models"]]
 
     def import_account(self, payload):
@@ -478,6 +495,9 @@ class TraeProvider:
                 "models": existing.get("models", []), "updatedAt": int(time.time()),
                 "expiresAt": _expires(auth.get("expiresAt", auth.get("expiredAt", 0))),
                 "secret": self._protect(credentials)}
+            for key in ("catalogSource", "catalogFetchedAt", "nativeConnected", "nativeError"):
+                if key in existing:
+                    row[key] = existing[key]
             if row["expiresAt"] and row["expiresAt"] <= time.time():
                 row["status"] = "login_expired"
                 row["lastError"] = "TRAE 登录已失效，请在 TRAE 内刷新后重新同步。"
@@ -634,28 +654,7 @@ class TraeProvider:
         except TraeError as error:
             quota_error = error
         try:
-            # The official 3.4.4 SDK uses GET, not the old reference's POST.
-            # Live read-only verification found model_list?type=chat as the
-            # working account-specific discovery endpoint; no guessed fallback.
-            value = self._json(_AGENT + "/api/ide/v1/model_list?type=chat", credentials, None, method="GET")
-            configs = value.get("model_configs")
-            if not isinstance(configs, list):
-                raise TraeError(502, "TRAE 模型响应结构不匹配。", "invalid_upstream_response")
-            models = []
-            for config in configs:
-                if not isinstance(config, dict):
-                    continue
-                if config.get("is_preset") is not True or config.get("status") is not True or config.get("client_connect"):
-                    continue
-                if self._has_custom_connection(config):
-                    continue
-                mid = config.get("name", "")
-                if isinstance(mid, str) and _MODEL.fullmatch(mid):
-                    name = config.get("display_name") or mid
-                    models.append({"upstreamId": mid, "name": str(name)[:160]})
-            if not models:
-                raise TraeError(502, "TRAE 未返回可用的模型列表。", "empty_models")
-            row["models"] = models
+            model_error = self._refresh_catalog(row, credentials)
         except TraeError as error:
             model_error = error
         row["quotaError"] = quota_error.message if quota_error else None
@@ -670,6 +669,54 @@ class TraeProvider:
             self._save(row)
         if quota_error and model_error:
             raise quota_error
+
+    def _refresh_catalog(self, row, credentials):
+        native_error = None
+        row["nativeConnected"] = False
+        uid = credentials.get("uid", "")
+        if getattr(self._native, "configured", False):
+            try:
+                catalog = self._native.catalog(uid)
+                row["models"] = catalog["models"]
+                row["catalogSource"] = "native_client"
+                row["catalogFetchedAt"] = catalog.get("fetchedAt") if _finite_number(catalog.get("fetchedAt")) else time.time()
+                row["nativeConnected"], row["nativeError"] = True, None
+                return None
+            except NativeBridgeError as error:
+                native_error = TraeError(error.status, error.message, error.code)
+        row["nativeError"] = native_error.message if native_error else None
+        # A current-client cache is directory evidence only. Every cached model
+        # still goes through the native UID/catalog/identity checks at chat time.
+        cached = self._catalog_reader(uid) if uid else None
+        if cached and cached.get("models"):
+            row["models"] = [{"upstreamId": m["upstreamId"], "name": m["name"],
+                              "route": "native_client", "source": "local_client_cache"} for m in cached["models"]]
+            row["catalogSource"], row["catalogFetchedAt"] = "local_client_cache", cached.get("fetchedAt")
+            return native_error or TraeError(503, "当前显示本机缓存目录；使用新模型需从新版桌面程序启动，并运行登录同一账号的 TRAE。", "native_bridge_unavailable")
+        if row.get("catalogSource") in ("native_client", "local_client_cache") and row.get("models"):
+            # Never overwrite a discovered new catalog with the old five-item
+            # endpoint merely because the native client is temporarily closed.
+            return native_error or TraeError(503, "保留上次原生模型目录；请运行 TRAE 后刷新，未降级到旧接口。", "native_bridge_unavailable")
+        value = self._json(_AGENT + "/api/ide/v1/model_list?type=chat", credentials, None, method="GET")
+        configs = value.get("model_configs")
+        if not isinstance(configs, list):
+            raise TraeError(502, "TRAE 模型响应结构不匹配。", "invalid_upstream_response")
+        models = []
+        for config in configs:
+            if not isinstance(config, dict):
+                continue
+            if config.get("is_preset") is not True or config.get("status") is not True or config.get("client_connect"):
+                continue
+            if self._has_custom_connection(config):
+                continue
+            mid = config.get("name", "")
+            if isinstance(mid, str) and _MODEL.fullmatch(mid):
+                name = config.get("display_name") or mid
+                models.append({"upstreamId": mid, "name": str(name)[:160], "route": "legacy_http", "source": "legacy_http"})
+        if not models:
+            raise TraeError(502, "TRAE 未返回可用的模型列表。", "empty_models")
+        row["models"], row["catalogSource"], row["catalogFetchedAt"] = models, "legacy_http", time.time()
+        return native_error
 
     @staticmethod
     def _has_custom_connection(config):
@@ -817,6 +864,10 @@ class TraeProvider:
                 raise TraeError(429, "TRAE 账号正在限流冷却，请稍后再试。", "rate_limited")
             if not any(m.get("upstreamId") == model[5:] for m in row.get("models", [])):
                 raise TraeError(503, "TRAE 模型列表已更新，请重新选择可用模型。", "model_unavailable")
+            config = next(m for m in row["models"] if m["upstreamId"] == model[5:])
+            if config.get("route") == "native_client":
+                yield from self._native_stream(row, model, body)
+                return
             credentials = self._credentials(row)
             response_id = "chatcmpl-trae-" + uuid.uuid4().hex
             created = int(time.time())
@@ -896,6 +947,39 @@ class TraeProvider:
                 self._mark_error(row, error)
                 raise
 
+    def _native_stream(self, row, model, body):
+        if any(key in body for key in ("temperature", "top_p")):
+            raise TraeError(422, "原生文本桥接未提供 temperature/top_p 控制，请移除这两个参数。", "unsupported_feature")
+        credentials = self._credentials(row)
+        max_chars = max(256, min(65536, int(body.get("max_tokens", 512)) * 16))
+        try:
+            value = self._native.chat(credentials.get("uid", ""), model[5:], body["messages"], max_chars=max_chars)
+        except NativeBridgeError as error:
+            failure = TraeError(error.status, error.message, error.code)
+            self._mark_error(row, failure)
+            raise failure from None
+        response_id, created = "chatcmpl-trae-" + uuid.uuid4().hex, int(time.time())
+        metadata = {"route": "native_client", "streaming": "buffered", "upstream_model": value["upstreamModel"]}
+
+        def chunk(delta, finish=None, usage=None):
+            result = {"id": response_id, "created": created, "object": "chat.completion.chunk", "model": model,
+                      "provider_metadata": metadata, "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}
+            if usage is not None:
+                result["usage"] = usage
+            return result
+
+        with self._lock:
+            row["status"] = "partial" if row.get("quotaError") or row.get("modelError") else "ready"
+            row["lastError"] = row.get("quotaError") or row.get("modelError")
+            row["cooldownUntil"], row["updatedAt"] = 0, int(time.time())
+            self._save(row)
+        yield chunk({"role": "assistant"})
+        if value.get("reasoning_content"):
+            yield chunk({"reasoning_content": value["reasoning_content"]})
+        # Compatibility SSE is buffered native text, not native token streaming.
+        yield chunk({"content": value["response"]})
+        yield chunk({}, "stop", value.get("usage", {}))
+
     def chat(self, payload):
         chunks = self.stream(payload)
         result = None
@@ -906,6 +990,8 @@ class TraeProvider:
         for chunk in chunks:
             if result is None:
                 result = {"id": chunk["id"], "created": chunk["created"], "model": chunk["model"], "object": "chat.completion"}
+                if chunk.get("provider_metadata"):
+                    result["provider_metadata"] = chunk["provider_metadata"]
             if chunk.get("usage"):
                 usage = chunk["usage"]
             for choice in chunk.get("choices", []):

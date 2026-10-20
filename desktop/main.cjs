@@ -5,6 +5,7 @@ const http = require('node:http');
 const { spawn, spawnSync } = require('node:child_process');
 const metadata = require('../package.json');
 const { createUpdater } = require('./updater.cjs');
+const { createTraeBridge } = require('./trae-native.cjs');
 
 const projectRoot = path.resolve(__dirname, '..');
 const runtimeRoot = process.env.WBSIM_RUNTIME_DIR || (app.isPackaged ? path.dirname(process.execPath) : projectRoot);
@@ -20,6 +21,7 @@ let mainWindow = null;
 let gateway = null; // { port, host, child }
 let tray = null;
 let quitting = false;
+let traeBridge = null;
 const desktopUpdater = createUpdater({
   app, dialog, repository: metadata.updateRepository, runtimeRoot,
   getGateway: () => gateway,
@@ -135,6 +137,8 @@ async function bootGateway() {
   fs.mkdirSync(usageDir, { recursive: true });
 
   const port = await findFreePort(PREFERRED_PORT);
+  // This bearer is per-launch and memory-only; never put it in gateway.json/logs.
+  traeBridge = await createTraeBridge();
   const child = spawn(python, [script, '--port', String(port), '--host', '127.0.0.1'], {
     cwd: hubDir,
     env: {
@@ -143,6 +147,8 @@ async function bootGateway() {
       WB_PROXY_USAGE_DIR: usageDir,
       WB_DESKTOP_VERSION: app.getVersion(),
       WB_UPDATE_REPO: metadata.updateRepository,
+      WB_TRAE_BRIDGE_URL: traeBridge.url,
+      WB_TRAE_BRIDGE_TOKEN: traeBridge.token,
       // 本地单机面板免密直进；要密码保护就去掉这一行（回到默认 admin）
       WB_PANEL_NO_PASSWORD: '1'
     },
@@ -303,6 +309,7 @@ app.on('activate', () => {
 
 app.on('before-quit', async () => {
   quitting = true;
+  if (traeBridge) { traeBridge.close().catch(() => {}); traeBridge = null; }
   try {
     fs.rmSync(portFile, { force: true });
   } catch { /* 忽略 */ }

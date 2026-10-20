@@ -1,10 +1,13 @@
 const { execFileSync } = require('node:child_process');
 const { createHash } = require('node:crypto');
 const { createWriteStream } = require('node:fs');
+const { unlink } = require('node:fs/promises');
 const { Readable, Transform } = require('node:stream');
 const { pipeline } = require('node:stream/promises');
 
 const REPOSITORY_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+const ASSET_HEADERS_TIMEOUT_MS = 30000;
+const ASSET_IDLE_TIMEOUT_MS = 180000;
 
 function loadToken(repository) {
   if (!REPOSITORY_RE.test(repository)) throw new Error('更新仓库配置无效');
@@ -48,26 +51,59 @@ async function assetResponse(repository, assetId, token) {
   if (!REPOSITORY_RE.test(repository) || !Number.isSafeInteger(assetId) || assetId < 1) throw new Error('发布附件编号无效');
   let url = `https://api.github.com/repos/${repository}/releases/assets/${assetId}`;
   for (let i = 0; i < 4; i++) {
-    const target = new URL(url);
+    let target;
+    try { target = new URL(url); }
+    catch { throw new Error('GitHub 下载重定向地址无效'); }
     const api = target.origin === 'https://api.github.com';
-    if (!api && !(target.protocol === 'https:' && target.hostname.endsWith('.githubusercontent.com'))) {
+    if (target.username || target.password || (!api && !(target.protocol === 'https:' && !target.port && target.hostname.endsWith('.githubusercontent.com')))) {
       throw new Error('更新下载地址不属于 GitHub，已停止');
     }
     const headers = { 'User-Agent': 'SuperProxy-Desktop-Updater', Accept: 'application/octet-stream' };
     if (api) headers.Authorization = `Bearer ${token}`;
-    const response = await fetch(url, { headers, redirect: 'manual', signal: AbortSignal.timeout(180000) })
-      .catch(() => { throw new Error('下载更新附件失败，请检查网络后重试'); });
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), ASSET_HEADERS_TIMEOUT_MS);
+    let response;
+    try {
+      response = await fetch(url, { headers, redirect: 'manual', signal: controller.signal });
+    } catch { throw new Error('下载更新附件失败，请检查网络后重试'); }
+    finally { clearTimeout(timer); }
     if ([301, 302, 303, 307, 308].includes(response.status)) {
       const next = response.headers.get('location');
-      await response.body?.cancel();
+      controller.abort();
+      await response.body?.cancel().catch(() => {});
       if (!next) throw new Error('GitHub 下载重定向缺少地址');
-      url = new URL(next, url).href;
+      try { url = new URL(next, url).href; }
+      catch { throw new Error('GitHub 下载重定向地址无效'); }
       continue;
     }
-    if (!response.ok) throw new Error(`更新附件下载失败（HTTP ${response.status}）`);
-    return response;
+    if (!response.ok) {
+      controller.abort();
+      await response.body?.cancel().catch(() => {});
+      throw new Error(`更新附件下载失败（HTTP ${response.status}）`);
+    }
+    return { response, controller };
   }
   throw new Error('更新附件的重定向次数过多');
+}
+
+// 响应头有独立期限；正文只在连续三分钟没有非空数据时取消。
+// 不对整个正文设置三分钟总时限，避免仍在正常传输的大附件被中止。
+async function* assetChunks({ response, controller }) {
+  let timer;
+  const watch = () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => controller.abort(), ASSET_IDLE_TIMEOUT_MS);
+  };
+  watch();
+  try {
+    for await (const chunk of response.body) {
+      controller.signal.throwIfAborted();
+      if (chunk.length) watch();
+      yield chunk;
+    }
+    controller.signal.throwIfAborted();
+  } catch { throw new Error('下载更新附件中断或长时间无进度，请重试'); }
+  finally { clearTimeout(timer); controller.abort(); }
 }
 
 async function readManifest(repository, asset, token) {
@@ -75,7 +111,7 @@ async function readManifest(repository, asset, token) {
   const response = await assetResponse(repository, asset.id, token);
   const chunks = [];
   let size = 0;
-  for await (const chunk of response.body) {
+  for await (const chunk of assetChunks(response)) {
     size += chunk.length;
     if (size > 65536) throw new Error('更新清单超过大小限制');
     chunks.push(chunk);
@@ -93,8 +129,22 @@ async function downloadAsset(repository, asset, token, destination, manifest) {
     if (size > manifest.size) return done(new Error('更新包超过清单声明的大小'));
     hash.update(chunk); done(null, chunk);
   } });
-  await pipeline(Readable.fromWeb(response.body), guard, createWriteStream(destination, { flags: 'wx', mode: 0o600 }));
-  if (size !== manifest.size || hash.digest('hex') !== manifest.sha256) throw new Error('更新包 SHA-256 或大小不匹配，未安装');
+  let created = false;
+  const output = createWriteStream(destination, { flags: 'wx', mode: 0o600 });
+  output.once('open', () => { created = true; });
+  try {
+    await pipeline(Readable.from(assetChunks(response)), guard, output);
+    if (size !== manifest.size || hash.digest('hex') !== manifest.sha256) throw new Error('更新包 SHA-256 或大小不匹配，未安装');
+  } catch (error) {
+    // wx 打开失败时文件不属于本次下载，不得删除或覆盖已有文件。
+    if (created) {
+      try { await unlink(destination); }
+      catch (cleanupError) {
+        if (cleanupError.code !== 'ENOENT') throw new Error('更新下载失败，未能清理本次下载文件，请检查暂存目录');
+      }
+    }
+    throw error;
+  } finally { response.controller.abort(); }
 }
 
 module.exports = { loadToken, apiJSON, readManifest, downloadAsset };

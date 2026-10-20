@@ -1597,6 +1597,7 @@ html[data-theme-style="cyber"] .dot{animation:cyberPulse 2.4s ease-in-out infini
     '仅统计已查询的 TRAE 账号': 'Only TRAE accounts with recorded credits are counted',
     '未查询账号': 'Accounts not queried',
     '可用模型数': 'Available models',
+    '目录模型数': 'Catalog model count',
     '本机 TRAE 客户端': 'Local TRAE client',
     '未检测到客户端': 'Client not detected',
     '客户端版本未知': 'Client version unknown',
@@ -1623,6 +1624,28 @@ html[data-theme-style="cyber"] .dot{animation:cyberPulse 2.4s ease-in-out infini
     '未查询 / 已导入': 'Not queried / imported',
     '暂无模型。导入账号后点击“刷新额度 / 模型”。': 'No models yet. Import an account, then choose Refresh credits / models.',
     '使用同一 OpenAI 兼容地址，模型 ID 保留 trae/ 前缀。': 'Use the same OpenAI-compatible base URL and keep the trae/ model prefix.',
+    '目录来源': 'Catalog source',
+    '原生客户端': 'Native client',
+    '本机目录缓存': 'Local catalog cache',
+    '旧接口': 'Legacy HTTP',
+    '来源未标注': 'Source not specified',
+    '目录刷新时间': 'Catalog fetched at',
+    '目录年龄': 'Catalog age',
+    '原生上次刷新': 'Last native refresh',
+    '成功（非实时状态）': 'Succeeded (not a live status)',
+    '未连接': 'Not connected',
+    '原生刷新失败': 'Native refresh failed',
+    '原生桥接已配置（非连接状态）': 'Native bridge configured (not a connection status)',
+    '原生桥接未配置': 'Native bridge not configured',
+    '原生桥接状态未知': 'Native bridge status unknown',
+    '原生文本桥接': 'Native text bridge',
+    '路由未标注': 'Route not specified',
+    '模型来源': 'Model source',
+    '仅目录，需运行本机 TRAE': 'Catalog only; local TRAE must be running',
+    '完成后缓冲返回 · 非逐 token': 'Buffered after completion · not token-by-token',
+    '原生文本桥接需保持官方 TRAE 运行，并登录同一账号。': 'The native text bridge requires the official TRAE client running and signed in to the same account.',
+    '原生请求完成后缓冲返回（非逐 token）；遇到非 finish 工具事件即停止请求。': 'Native responses are buffered until completion (not token-by-token); a non-finish tool event stops the request.',
+    'TRAE 请求超时（90 秒）': 'TRAE request timed out (90 seconds)',
     '复制模型 ID': 'Copy model ID',
     '复制 Base URL': 'Copy base URL',
     '读取成功': 'Loaded',
@@ -3476,7 +3499,7 @@ html[data-theme-style="cyber"] .dot{animation:cyberPulse 2.4s ease-in-out infini
       <div class="card"><div class="k">TRAE 账号</div><div class="v" id="traeAccountCount">—</div><div class="s" id="traeEnabledCount">—</div></div>
       <div class="card accent"><div class="k">已记录积分合计</div><div class="v" id="traeCreditTotal">未查询</div><div class="s">仅统计已查询的 TRAE 账号</div></div>
       <div class="card"><div class="k">未查询账号</div><div class="v" id="traeUnknownCount">—</div><div class="s">TRAE 积分</div></div>
-      <div class="card"><div class="k">可用模型数</div><div class="v" id="traeModelCount">—</div><div class="s" id="traeClientVersion">本机 TRAE 客户端</div></div>
+      <div class="card"><div class="k">目录模型数</div><div class="v" id="traeModelCount">—</div><div class="s" id="traeClientVersion">本机 TRAE 客户端</div><div class="s" id="traeNativeBridgeStatus">原生桥接状态未知</div></div>
     </div>
     <section id="traeAccountsSection">
       <h2>TRAE 账号</h2>
@@ -3500,6 +3523,8 @@ html[data-theme-style="cyber"] .dot{animation:cyberPulse 2.4s ease-in-out infini
     <section id="traeModelsSection">
       <h2>TRAE 模型</h2>
       <p class="trae-note">使用同一 OpenAI 兼容地址，模型 ID 保留 trae/ 前缀。</p>
+      <p class="trae-note">原生文本桥接需保持官方 TRAE 运行，并登录同一账号。</p>
+      <p class="trae-note">原生请求完成后缓冲返回（非逐 token）；遇到非 finish 工具事件即停止请求。</p>
       <div class="trae-endpoint"><code class="mono" id="traeBaseUrl" data-no-i18n></code><button type="button" class="sec" onclick="copyTraeValue(document.getElementById('traeBaseUrl').textContent)">复制 Base URL</button></div>
       <div id="traeModels" class="trae-model-list"><div class="trae-empty">暂无模型。导入账号后点击“刷新额度 / 模型”。</div></div>
     </section>
@@ -12128,11 +12153,20 @@ function traeTime(value){
   return Number.isFinite(date.getTime()) ? date.toLocaleString() : '';
 }
 
+function traeCatalogSource(value){
+  return ['native_client','local_client_cache','legacy_http'].includes(value) ? value : '';
+}
+
+function traeSourceLabel(value){
+  const labels = {native_client:'原生客户端',local_client_cache:'本机目录缓存',legacy_http:'旧接口'};
+  return traeText(labels[value] || '来源未标注');
+}
+
 function traeResultStatus(success){
   const accounts = TRAE_DATA ? TRAE_DATA.accounts : [];
   if(accounts.some(a => a.status === 'login_expired')){
     traeSetStatus(traeText('登录已失效') + ' · ' + traeText('在 TRAE 内刷新后重新同步'), true);
-  }else if(accounts.some(a => a.status === 'partial' || a.quotaError || a.modelError)){
+  }else if(accounts.some(a => a.status === 'partial' || a.quotaError || a.modelError || a.nativeError)){
     traeSetStatus(traeText('部分查询未完成，请查看账号提示。'), true);
   }else{
     traeSetStatus(traeText(success));
@@ -12146,13 +12180,24 @@ function renderTraeProvider(data){
       id:a.id, label:String(a.label || a.id), region:String(a.region || 'cn'), enabled:!!a.enabled,
       status:String(a.status || 'unknown'), credits:traeCredits(a.credits), lastError:a.lastError ? String(a.lastError) : '',
       quotaError:a.quotaError ? String(a.quotaError) : '', modelError:a.modelError ? String(a.modelError) : '',
+      catalogSource:traeCatalogSource(a.catalogSource), catalogFetchedAt:traeTime(a.catalogFetchedAt),
+      catalogAgeSeconds:typeof a.catalogAgeSeconds === 'number' && Number.isFinite(a.catalogAgeSeconds) && a.catalogAgeSeconds >= 0 ? Math.floor(a.catalogAgeSeconds) : null,
+      nativeConnected:typeof a.nativeConnected === 'boolean' ? a.nativeConnected : null,
+      nativeError:a.nativeError ? String(a.nativeError) : '',
       expiresAt:traeTime(a.expiresAt),
       creditExpiry:(Array.isArray(a.creditDetails) ? a.creditDetails : []).filter(d => d && typeof d.remaining === 'number' && d.remaining > 0)
         .map(d => traeDate(d.expire_time || d.end_time)).filter(d => Number.isFinite(d.getTime()))
         .sort((a,b) => a.getTime() - b.getTime()).map(d => d.toLocaleString())[0] || ''
     })),
-    models: (Array.isArray(data.models) ? data.models : []).filter(m => m && typeof m.id === 'string' && m.id.startsWith('trae/')).map(m => ({id:m.id, name:String(m.name || m.id)})),
-    client: data.client && typeof data.client === 'object' ? {installed:!!data.client.installed, version:String(data.client.version || '')} : {}
+    models: (Array.isArray(data.models) ? data.models : []).filter(m => m && typeof m.id === 'string' && m.id.startsWith('trae/')).map(m => ({
+      id:m.id, name:String(m.name || m.id), source:traeCatalogSource(m.source),
+      route:['native_client','legacy_http'].includes(m.route) ? m.route : '',
+      streaming:['buffered','sse'].includes(m.streaming) ? m.streaming : ''
+    })),
+    client: data.client && typeof data.client === 'object' ? {
+      installed:!!data.client.installed, version:String(data.client.version || ''),
+      nativeBridgeConfigured:typeof data.client.nativeBridgeConfigured === 'boolean' ? data.client.nativeBridgeConfigured : null
+    } : {}
   };
   const d = TRAE_DATA;
   const summary = traeSummary(d);
@@ -12163,6 +12208,8 @@ function renderTraeProvider(data){
   document.getElementById('traeModelCount').textContent = d.models.length;
   document.getElementById('traeClientVersion').textContent = !d.client.installed
     ? traeText('未检测到客户端') : 'TRAE CN · ' + (d.client.version || traeText('客户端版本未知'));
+  document.getElementById('traeNativeBridgeStatus').textContent = traeText(d.client.nativeBridgeConfigured === true
+    ? '原生桥接已配置（非连接状态）' : d.client.nativeBridgeConfigured === false ? '原生桥接未配置' : '原生桥接状态未知');
   document.getElementById('traeBaseUrl').textContent = location.origin + '/v1';
   const statuses = {ready:'正常',active:'正常',enabled:'已启用',disabled:'已禁用',expired:'已过期',error:'错误',unknown:'未查询 / 已导入',imported:'未查询 / 已导入',
     partial:'部分查询失败',login_expired:'登录已失效',upstream_error:'上游服务错误',rate_limited:'请求受限'};
@@ -12172,6 +12219,12 @@ function renderTraeProvider(data){
       + '<div class="trae-account-head"><span class="trae-account-name" data-no-i18n>' + esc(a.label) + '</span><span class="badge ' + (a.enabled ? 'on' : 'off') + '">' + esc(traeText(state)) + '</span></div>'
       + '<div class="trae-note">TRAE · <span data-no-i18n>' + esc(a.region.toUpperCase()) + '</span></div>'
       + '<div class="trae-account-credit">' + esc(traeCreditLabel(a.credits)) + '</div>'
+      + '<div class="trae-note">' + esc(traeText('目录来源')) + ' · ' + esc(traeSourceLabel(a.catalogSource)) + '</div>'
+      + '<div class="trae-note">' + esc(traeText('目录刷新时间')) + ' · <span data-no-i18n>' + esc(a.catalogFetchedAt || traeText('未查询')) + '</span></div>'
+      + (a.catalogAgeSeconds !== null ? '<div class="trae-note">' + esc(traeText('目录年龄')) + ' · <span data-no-i18n>' + esc(a.catalogAgeSeconds.toLocaleString()) + '</span> ' + esc(traeText('秒')) + '</div>' : '')
+      + '<div class="trae-note">' + esc(traeText('原生上次刷新')) + ' · ' + esc(traeText(a.nativeConnected === true ? '成功（非实时状态）' : a.nativeConnected === false ? '未连接' : '未查询')) + '</div>'
+      + (a.catalogSource === 'local_client_cache' ? '<div class="trae-note">' + esc(traeText('仅目录，需运行本机 TRAE')) + '</div>' : '')
+      + (a.nativeError ? '<div class="trae-account-error">' + esc(traeText('原生刷新失败')) + ' · <span data-no-i18n>' + esc(a.nativeError) + '</span></div>' : '')
       + (a.expiresAt ? '<div class="trae-note">登录有效期 · <span data-no-i18n>' + esc(a.expiresAt) + '</span></div>' : '')
       + (a.creditExpiry ? '<div class="trae-note">最近积分期限 · <span data-no-i18n>' + esc(a.creditExpiry) + '</span></div>' : '')
       + (a.quotaError ? '<div class="trae-account-error">额度查询失败 · <span data-no-i18n>' + esc(a.quotaError) + '</span></div>' : '')
@@ -12183,24 +12236,48 @@ function renderTraeProvider(data){
       + '<button type="button" class="danger" data-trae-action onclick="traeAccountAction(\'remove\',' + i + ')">移除</button></div></article>';
   }).join('') : '<div class="trae-empty">还没有 TRAE 账号。请先登录本机 TRAE，再点击“扫描本机 TRAE”。</div>';
   document.getElementById('traeModels').innerHTML = d.models.length ? d.models.map((m, i) =>
-    '<div class="trae-model"><div class="trae-model-info" data-no-i18n><strong>' + esc(m.name) + '</strong><div class="mono">' + esc(m.id) + '</div></div>'
+    '<div class="trae-model"><div class="trae-model-info"><strong data-no-i18n>' + esc(m.name) + '</strong><div class="mono" data-no-i18n>' + esc(m.id) + '</div>'
+    + '<div class="trae-note">' + esc(traeText(m.route === 'native_client' ? '原生文本桥接' : m.route === 'legacy_http' ? '旧接口' : '路由未标注'))
+    + (m.streaming ? ' · ' + esc(m.streaming === 'buffered' ? traeText('完成后缓冲返回 · 非逐 token') : 'SSE') : '') + '</div>'
+    + '<div class="trae-note">' + esc(traeText('模型来源')) + ' · ' + esc(traeSourceLabel(m.source)) + '</div>'
+    + (m.source === 'local_client_cache' ? '<div class="trae-note">' + esc(traeText('仅目录，需运行本机 TRAE')) + '</div>' : '') + '</div>'
     + '<button type="button" class="sec" onclick="copyTraeModel(' + i + ')" aria-label="复制模型 ID">复制</button></div>'
   ).join('') : '<div class="trae-empty">暂无模型。导入账号后点击“刷新额度 / 模型”。</div>';
   traeSetBusy(TRAE_BUSY);
   if(window.WB_I18N) window.WB_I18N.apply();
 }
 
+// TRAE native catalog reads can take longer than other provider operations.
+// Keep this timeout local; do not alter shared postJSON behavior.
+async function traeRequest(url, body){
+  if(GATEWAY_DOWN) throw new Error('网关已关闭');
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 90000);
+  try{
+    const isPost = body !== undefined;
+    const r = await fetch(url, {
+      method:isPost ? 'POST' : 'GET', cache:'no-store', signal:controller.signal,
+      headers:authHeaders(isPost ? {'Content-Type':'application/json'} : {}),
+      ...(isPost ? {body:JSON.stringify(body || {})} : {})
+    });
+    const text = await r.text();
+    let data = {};
+    try{ data = text ? JSON.parse(text) : {}; }catch(e){ data = {raw:text}; }
+    if(r.status === 401 || r.status === 403){ panelSessionLost(); throw new Error('unauthorized'); }
+    if(!r.ok) throw new Error((data.error && data.error.message) || String(r.status));
+    return data;
+  }catch(e){
+    if(e.name === 'AbortError') throw new Error(traeText('TRAE 请求超时（90 秒）'));
+    throw e;
+  }finally{clearTimeout(timeout);}
+}
+
 async function loadTraeProvider(){
   if(TRAE_BUSY) return;
   traeSetBusy(true);
   traeSetStatus(traeText('加载 TRAE 状态中…'));
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 30000);
   try{
-    const r = await fetch('/providers/trae', {cache:'no-store', headers:authHeaders(), signal:controller.signal});
-    const data = await r.json().catch(() => ({}));
-    if(r.status === 401 || r.status === 403){ panelSessionLost(); throw new Error('unauthorized'); }
-    if(!r.ok) throw new Error((data.error && data.error.message) || String(r.status));
+    const data = await traeRequest('/providers/trae');
     renderTraeProvider(data);
     traeResultStatus('读取成功');
   }catch(e){
@@ -12208,7 +12285,7 @@ async function loadTraeProvider(){
       traeSetStatus(traeText('TRAE 状态读取失败') + ': ' + e.message + (TRAE_DATA ? ' · ' + traeText('上次读取失败，下面保留的是此前状态。') : ''), true);
       if(!TRAE_DATA) document.getElementById('traeAccounts').textContent = traeText('TRAE 状态读取失败');
     }
-  }finally{clearTimeout(timeout); traeSetBusy(false);}
+  }finally{traeSetBusy(false);}
 }
 
 async function traeProviderAction(action, body){
@@ -12216,7 +12293,7 @@ async function traeProviderAction(action, body){
   traeSetBusy(true);
   traeSetStatus(traeText('正在处理 TRAE 操作…'));
   try{
-    const data = await postJSON('/providers/trae/' + action, body);
+    const data = await traeRequest('/providers/trae/' + action, body);
     renderTraeProvider(data);
     traeResultStatus('TRAE 操作已完成');
   }catch(e){

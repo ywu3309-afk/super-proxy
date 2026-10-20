@@ -145,7 +145,8 @@ class ProviderTests(unittest.TestCase):
         status = self.provider.status()
         self.assertAlmostEqual(status["accounts"][0]["credits"], 4540.334)
         self.assertEqual(status["accounts"][0]["status"], "ready")
-        self.assertEqual(status["models"], [{"id": MODEL, "name": "Test Model"}])
+        self.assertEqual(status["models"], [{"id": MODEL, "name": "Test Model", "route": "legacy_http",
+                                              "source": "legacy_http", "streaming": "sse"}])
         quota, models = [x[0] for x in self.http.requests]
         self.assertEqual(quota.full_url, "https://api.trae.cn/trae/api/v2/pay/ide_user_ent_usage")
         self.assertEqual(json.loads(quota.data), {"require_usage": True, "req_source": 1})

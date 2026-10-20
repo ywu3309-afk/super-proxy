@@ -1,6 +1,6 @@
 {
   "name": "workbuddy-credit-simulator",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "private": true,
   "description": "WorkBuddy 多账号调度网关（融合 workbuddy2api-hub）：Python 核心（账号池/自动签到/任务福利/用量看板/智能体/设置/日志）+ Electron 便携壳。",
   "type": "module",
@@ -16,6 +16,7 @@
     "package:win": "node build/package.mjs",
     "runtime:prepare": "python build/portable_runtime.py prepare --tarball cpython.tar.gz --dest python",
     "test:desktop-update": "node --test test/desktop-update.test.mjs",
+    "test:trae-native": "node --test test/trae-native.test.mjs test/trae-renderer.test.mjs",
     "release:prepare": "node build/release.mjs",
     "release:publish": "node scripts/publish-release.mjs"
   },
