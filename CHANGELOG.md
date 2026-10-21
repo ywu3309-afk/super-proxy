@@ -1,5 +1,11 @@
 # 更新记录
 
+## 1.3.5（DSH 首局提示兼容）
+
+- 只在请求开头连续的 system/developer 初始指令块中，将会触发 WorkBuddy 渠道校验的 `DeepSeek Harness` 品牌句改写为 `DeepSeek`；不修改用户正文、工具参数、图片 URL、文件路径、历史消息或其它字段。
+- 增加 URL、路径、文件名、大小写、文本块、developer 入口和对象不变性的回归测试。
+- 本项针对 DSH 首局提示的已复现触发形状，不代表所有 `400 / 11128` 场景都已解决。
+
 ## 1.3.4（WorkBuddy 上游错误诊断）
 
 - Chat Completions 和 Responses 对已确认的 `400 / 11128` 返回简明渠道校验提示，并单独保留 provider、模型和上游请求编号，不再把整段上游 JSON 嵌进错误消息。
