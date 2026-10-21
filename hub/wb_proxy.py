@@ -58,6 +58,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import http.client
 import uuid
 import wb_accounts
 import wb_activity
@@ -77,6 +78,7 @@ import wb_probes
 import wb_updates
 import wb_update_request
 import wb_trae_http
+import wb_upstream_errors
 IS_WINDOWS = os.name == "nt"
 
 # ---- 一键配置客户端（wb_agents）的可用性判定（issue #246）----
@@ -911,7 +913,7 @@ def _persist_usage(row, fail_label):
 
 def record_error(model, status, message, elapsed_ms=None, account=None,
                  usage=None, stream=None, ttft_ms=None, gen_ms=None, fp=None,
-                 outcome="failed", key=None):
+                 outcome="failed", key=None, upstream=None):
     """Record one failed request as exactly one JSONL row.
 
     Passing the account uid records which account the request was bound to, so
@@ -955,6 +957,11 @@ def record_error(model, status, message, elapsed_ms=None, account=None,
         row["account"] = account
         acc = POOL.get(account) if POOL else None
         row["realm"] = acc.realm if acc else CURRENT_REALM
+    if upstream:
+        # Preserve allowlisted diagnostics independently of the short UI text.
+        row["upstream"] = {name: upstream[name] for name in (
+            "provider", "code", "upstream_code", "upstream_request_id"
+        ) if name in upstream}
     row["key"] = key or ""
     _persist_usage(row, "error persist failed")
     dur = f" {elapsed_ms:.0f}ms" if elapsed_ms is not None else ""
@@ -13728,6 +13735,9 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
             # model and the request, and the callers record it on the usage row.
             return resp, account, upstream_effort_of(upstream_body, model)
         except urllib.error.HTTPError as exc:
+            # A direct 4xx raise bypasses the loop's final attribution block.
+            # Retain the actual account without changing retries or routing.
+            exc.account_uid = account.uid
             if exc.code == 429:
                 try:
                     detail = exc.read(600).decode("utf-8", "replace")
@@ -17044,6 +17054,29 @@ class Handler(BaseHTTPRequestHandler):
         if hint:
             error["gateway_hint"] = hint
         self._json(code, {"error": error})
+
+    def _upstream_http_error(self, exc, model, t_start):
+        try:
+            detail = wb_upstream_errors.read_http_error_detail(exc)
+        except (OSError, http.client.HTTPException) as read_exc:
+            # Keep the original HTTP rejection even if its body is interrupted.
+            detail = "upstream error body unavailable (%s)" % type(read_exc).__name__
+        error = wb_upstream_errors.classify_workbuddy_error(
+            exc.code, detail, model=model)
+        # Unknown errors retain the old bounded textual envelope. A confirmed
+        # channel rejection returns only classified fields, never arbitrary
+        # upstream JSON or another automatic upstream attempt.
+        message = error["message"] if error else detail[:600]
+        record_error(model, exc.code, message,
+                     elapsed_ms=int((time.time() - t_start) * 1000),
+                     account=getattr(exc, "account_uid", None),
+                     key=self._key_id(), upstream=error)
+        if not error:
+            return self._error(exc.code, f"upstream {exc.code}: {message}")
+        self._handle_expect_continue()
+        self._discard_body()
+        return self._json(exc.code, {"error": error})
+
     def _anthropic_error(self, code, message, err_type=None):
         """Reply with the Anthropic JSON error envelope, not OpenAI's."""
         self._handle_expect_continue()
@@ -19911,12 +19944,7 @@ class Handler(BaseHTTPRequestHandler):
                          key=self._key_id())
             return self._rate_limited(exc)
         except urllib.error.HTTPError as exc:
-            detail = exc.read(600).decode("utf-8", "replace")
-            record_error(model, exc.code, detail,
-                         elapsed_ms=int((time.time() - t_start) * 1000),
-                         account=getattr(exc, "account_uid", None),
-                         key=self._key_id())
-            return self._error(exc.code, f"upstream {exc.code}: {detail}")
+            return self._upstream_http_error(exc, model, t_start)
         except Exception as exc:
             message = str(exc)
             record_error(model, 502, message,
@@ -20517,12 +20545,7 @@ class Handler(BaseHTTPRequestHandler):
                          key=self._key_id())
             return self._rate_limited(exc)
         except urllib.error.HTTPError as exc:
-            detail = exc.read(600).decode("utf-8", "replace")
-            record_error(model, exc.code, detail,
-                         elapsed_ms=int((time.time() - t_start) * 1000),
-                         account=getattr(exc, "account_uid", None),
-                         key=self._key_id())
-            return self._error(exc.code, f"upstream {exc.code}: {detail}")
+            return self._upstream_http_error(exc, model, t_start)
         except Exception as exc:
             message = str(exc)
             record_error(model, 502, message, elapsed_ms=int((time.time() - t_start) * 1000),
