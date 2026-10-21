@@ -11406,6 +11406,57 @@ def sanitize_content(content):
     return content
 
 
+# Limit the DSH brand compatibility rewrite to the initial instruction block.
+# Do not reuse sanitize_text here: that shared helper also sees application
+# data, tool arguments and conversation history. Paths and filename tokens
+# remain intact; a sentence-ending period is ordinary punctuation.
+INITIAL_HARNESS_BRAND_RE = re.compile(
+    r"(?<![\w/\\:.-?=&+#%])DeepSeek[ \t]+Harness\b(?![\\/_-]|\.[A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+
+
+def _sanitize_initial_harness_content(content):
+    if isinstance(content, str):
+        return INITIAL_HARNESS_BRAND_RE.sub("DeepSeek", content)
+    if not isinstance(content, list):
+        return content
+    rewritten = None
+    for index, part in enumerate(content):
+        if (not isinstance(part, dict)
+                or part.get("type") not in ("text", "input_text")
+                or not isinstance(part.get("text"), str)):
+            continue
+        text = INITIAL_HARNESS_BRAND_RE.sub("DeepSeek", part["text"])
+        if text != part["text"]:
+            if rewritten is None:
+                rewritten = list(content)
+            rewritten[index] = dict(part, text=text)
+    return rewritten if rewritten is not None else content
+
+
+def sanitize_initial_harness_prompt(messages):
+    """Rewrite DSH branding only in consecutive initial instruction messages.
+
+    Clients resend the initial system prompt on later turns. Apply this to
+    that prefix on every request, not to the rest of the conversation, and
+    never mutate the client's original message objects.
+    """
+    if not isinstance(messages, list):
+        return messages
+    rewritten = None
+    for index, message in enumerate(messages):
+        if (not isinstance(message, dict)
+                or message.get("role") not in ("system", "developer")):
+            break
+        content = _sanitize_initial_harness_content(message.get("content"))
+        if content != message.get("content"):
+            if rewritten is None:
+                rewritten = list(messages)
+            rewritten[index] = dict(message, content=content)
+    return rewritten if rewritten is not None else messages
+
+
 def preserve_request_contract_enabled():
     """Opt-in field/data preservation; does not enforce upstream constraints."""
     return os.environ.get("WB_PRESERVE_REQUEST_CONTRACT", "0").strip().lower() in (
@@ -12643,6 +12694,7 @@ def build_upstream_body(payload):
     # Prompt mode runs before sanitize/backfill so the gateway prompt is the
     # one the upstream sees, with the client's fingerprint-y system text gone.
     messages = apply_prompt_mode(messages)
+    messages = sanitize_initial_harness_prompt(messages)
     messages = sanitize_messages(messages)
     messages = backfill_reasoning_content(
         messages, model, thinking_enabled=thinking_enabled
