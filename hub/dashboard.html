@@ -2662,6 +2662,16 @@ html[data-theme-style="cyber"] .dot{animation:cyberPulse 2.4s ease-in-out infini
     '计，默认 5 分钟；填 0 表示不自动刷新（仍可用「立即取价」手动取一次）。': '; the default is 5 minutes. 0 turns automatic fetching off (you can still fetch once with Fetch prices now).',
     '设备码:': 'Device code:',
     '设置': 'Settings',
+    '开机自启动': 'Start with Windows',
+    '登录 Windows 后自动运行网关，默认收起到系统托盘；双击托盘图标即可打开界面。仅对当前电脑的当前用户生效。': 'Automatically run the gateway in the system tray after signing in to Windows. Double-click the tray icon to open the panel. This applies only to the current user on this PC.',
+    '正在读取启动设置…': 'Reading startup settings...',
+    '请在桌面软件中设置开机自启动，浏览器页面不修改系统启动项。': 'Configure startup in the desktop app. The browser panel cannot change Windows startup items.',
+    '已开启，下次登录 Windows 后自动在后台运行。': 'Enabled. The gateway will run in the background next time you sign in to Windows.',
+    '已关闭，不会随 Windows 自动启动。': 'Disabled. The app will not start with Windows.',
+    '已被 Windows 启动应用设置禁用，可重新打开此开关。': 'Disabled in Windows startup settings. Turn this switch on again to enable it.',
+    '正在保存启动设置…': 'Saving startup settings...',
+    '开机自启动已开启': 'Start with Windows enabled',
+    '开机自启动已关闭': 'Start with Windows disabled',
     '智能体配置': 'Agent Setup',
     '一键配置': 'One-click Setup',
     '近 1 天': 'Last 1 day',
@@ -4050,6 +4060,23 @@ html[data-theme-style="cyber"] .dot{animation:cyberPulse 2.4s ease-in-out infini
 
     <!-- 左侧导航由 initPageNav() 扫描本页的 section 自动生成，
          增删区块无需同步改动这里。 -->
+    <section id="desktopStartupSection">
+      <h2>开机自启动</h2>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap">
+        <div style="flex:1;min-width:240px">
+          <div style="font-size:12px;color:var(--dim);line-height:1.7" id="desktopStartupDescription">登录 Windows 后自动运行网关，默认收起到系统托盘；双击托盘图标即可打开界面。仅对当前电脑的当前用户生效。</div>
+          <div id="desktopStartupStatus" role="status" aria-live="polite" style="font-size:12px;margin-top:6px;color:var(--dim)">正在读取启动设置…</div>
+          <div class="mono" id="desktopStartupPath" data-no-i18n style="font-size:11px;color:var(--dim);margin-top:6px;overflow-wrap:anywhere"></div>
+        </div>
+        <label class="switch">
+          <input id="desktopStartupToggle" type="checkbox" role="switch" aria-label="开机自启动"
+                 aria-describedby="desktopStartupDescription desktopStartupStatus" disabled onchange="saveDesktopAutostart(this)">
+          <span class="switch-track" aria-hidden="true"></span>
+          <span>开机自启动</span>
+        </label>
+      </div>
+    </section>
+
     <section>
       <h2>面板访问密码 <em id="setPwdState"></em></h2>
       <div style="font-size:12px;color:var(--dim);margin-bottom:12px">用于打开本看板。默认密码为 <b>admin</b>，建议立即修改。</div>
@@ -10281,7 +10308,60 @@ async function saveWinMaxHeight(btn){
 }
 // ==== 面板窗口限高结束 ====
 
+let DESKTOP_STARTUP_BUSY = false;
+let DESKTOP_STARTUP_READ = 0;
+function renderDesktopAutostart(status){
+  const input = document.getElementById('desktopStartupToggle');
+  const note = document.getElementById('desktopStartupStatus');
+  const executable = document.getElementById('desktopStartupPath');
+  if(!input || !note || !executable) return;
+  input.checked = status.enabled === true;
+  input.disabled = status.supported !== true || DESKTOP_STARTUP_BUSY;
+  executable.textContent = status.executablePath || '';
+  note.style.color = status.enabled ? 'var(--accent2)' : (status.blocked ? 'var(--warn)' : 'var(--dim)');
+  note.textContent = status.supported !== true
+    ? (status.reason || '请在桌面软件中设置开机自启动，浏览器页面不修改系统启动项。')
+    : status.blocked ? '已被 Windows 启动应用设置禁用，可重新打开此开关。'
+    : status.enabled ? '已开启，下次登录 Windows 后自动在后台运行。'
+    : '已关闭，不会随 Windows 自动启动。';
+}
+async function loadDesktopAutostart(){
+  if(DESKTOP_STARTUP_BUSY) return;
+  const serial = ++DESKTOP_STARTUP_READ;
+  const bridge = window.superProxyDesktop;
+  if(!bridge){ renderDesktopAutostart({supported:false}); return; }
+  try {
+    const status = await bridge.getAutostart();
+    if(serial === DESKTOP_STARTUP_READ && !DESKTOP_STARTUP_BUSY) renderDesktopAutostart(status);
+  } catch(e) {
+    if(serial !== DESKTOP_STARTUP_READ || DESKTOP_STARTUP_BUSY) return;
+    renderDesktopAutostart({supported:false, reason:'读取开机自启动失败: ' + e.message});
+  }
+}
+async function saveDesktopAutostart(input){
+  if(DESKTOP_STARTUP_BUSY || !window.superProxyDesktop) return;
+  const enabled = input.checked;
+  ++DESKTOP_STARTUP_READ;
+  DESKTOP_STARTUP_BUSY = true;
+  input.disabled = true;
+  const note = document.getElementById('desktopStartupStatus');
+  note.textContent = '正在保存启动设置…';
+  try {
+    const status = await window.superProxyDesktop.setAutostart(enabled);
+    DESKTOP_STARTUP_BUSY = false;
+    renderDesktopAutostart(status);
+    toast(status.enabled ? '开机自启动已开启' : '开机自启动已关闭', 'ok');
+  } catch(e) {
+    DESKTOP_STARTUP_BUSY = false;
+    await loadDesktopAutostart();
+    note.textContent = '开机自启动设置失败: ' + e.message;
+    note.style.color = 'var(--bad)';
+    toast('开机自启动设置失败: ' + e.message, 'bad');
+  }
+}
+
 async function loadSettings(showToast){
+  loadDesktopAutostart();
   try {
     const data = await getJSON('/settings');
     const pwdState = document.getElementById('setPwdState');

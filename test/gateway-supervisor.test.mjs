@@ -269,12 +269,13 @@ test('shutdown while launch is pending disposes the late child and never publish
 
 // Run the real main.cjs wiring with in-memory Electron/process/network doubles.
 // No real app, process, account data, socket or filesystem write is involved.
-function desktopFixture({ bridgeGate, wrongHealthId = false, delayedKill = false } = {}) {
+function desktopFixture({ bridgeGate, wrongHealthId = false, delayedKill = false, launchArgs = [] } = {}) {
   const files = new Map();
   const children = [];
   const probes = [];
   const ports = [];
   const pages = [];
+  const windows = [];
   const dialogs = [];
   const logs = [];
   const timers = new Map();
@@ -287,8 +288,9 @@ function desktopFixture({ bridgeGate, wrongHealthId = false, delayedKill = false
     quit: () => app.emit('before-quit')
   });
   class BrowserWindow extends EventEmitter {
-    constructor() {
+    constructor(options) {
       super();
+      windows.push(options);
       this.webContents = { setWindowOpenHandler() {} };
     }
     loadURL(url) { pages.push(url); return Promise.resolve(); }
@@ -370,6 +372,7 @@ function desktopFixture({ bridgeGate, wrongHealthId = false, delayedKill = false
     },
     '../package.json': { updateRepository: 'fixture/private', version: '1.2.1' },
     './updater.cjs': { createUpdater: () => ({ check() {} }) },
+    './autostart.cjs': require('../desktop/autostart.cjs'),
     './trae-native.cjs': {
       createTraeBridge: async () => { bridgeCreates++; if (bridgeGate) await bridgeGate.promise; return bridge; }
     },
@@ -384,12 +387,12 @@ function desktopFixture({ bridgeGate, wrongHealthId = false, delayedKill = false
   const context = {
     require: name => Object.hasOwn(stubs, name) ? stubs[name] : require(name),
     __dirname: path.dirname(desktopPath), module: { exports: {} },
-    process: { env: { WBSIM_RUNTIME_DIR: 'D:/fixture-gateway' }, pid: 123, execPath: 'D:/fixture.exe', resourcesPath: 'D:/resources', platform: 'win32', on() {} },
+    process: { env: { WBSIM_RUNTIME_DIR: 'D:/fixture-gateway' }, argv: ['fixture.exe', ...launchArgs], pid: 123, execPath: 'D:/fixture.exe', resourcesPath: 'D:/resources', platform: 'win32', on() {} },
     Buffer, AbortController, setTimeout, clearTimeout, console
   };
   vm.runInNewContext(readFileSync(desktopPath, 'utf8') + '\nmodule.exports = { bootGateway, createWindow, gatewaySupervisor, waitForHealthy };', context, { filename: desktopPath });
   return {
-    ...context.module.exports, files, children, probes, ports, pages, dialogs, timers, logs,
+    ...context.module.exports, files, children, probes, ports, pages, windows, dialogs, timers, logs,
     get bridgeCreates() { return bridgeCreates; }, get bridgeCloses() { return bridgeCloses; },
     occupyPort() { occupied = true; },
     async crash() {
@@ -491,4 +494,22 @@ test('desktop never drifts to a different port when the original port becomes oc
   assert.match(decodeURIComponent(f.pages.at(-1)), /自动恢复已停止/);
   assert.equal(f.bridgeCreates, 1);
   await f.quit();
+});
+
+test('manual desktop launches show the panel while keeping sandbox and context isolation enabled', async () => {
+  const f = desktopFixture();
+  await f.createWindow(8787);
+  const options = f.windows[0];
+  assert.equal(options.show, true);
+  assert.equal(options.webPreferences.sandbox, true);
+  assert.equal(options.webPreferences.contextIsolation, true);
+  assert.equal(options.webPreferences.nodeIntegration, false);
+  assert.match(options.webPreferences.preload, /desktop[\\/]preload\.cjs$/);
+});
+
+test('Windows autostart launches load the gateway panel without showing a window', async () => {
+  const f = desktopFixture({ launchArgs: ['--autostart'] });
+  await f.createWindow(8787);
+  assert.equal(f.windows[0].show, false);
+  assert.equal(f.pages[0], 'http://127.0.0.1:8787/');
 });

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, Tray, shell, dialog, nativeImage } = require('electron');
+const { app, BrowserWindow, Menu, Tray, shell, dialog, nativeImage, ipcMain } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 const http = require('node:http');
@@ -8,6 +8,7 @@ const metadata = require('../package.json');
 const { createUpdater } = require('./updater.cjs');
 const { createTraeBridge } = require('./trae-native.cjs');
 const { createGatewaySupervisor } = require('./gateway-supervisor.cjs');
+const { createAutostart, installAutostartIPC } = require('./autostart.cjs');
 
 const projectRoot = path.resolve(__dirname, '..');
 const runtimeRoot = process.env.WBSIM_RUNTIME_DIR || (app.isPackaged ? path.dirname(process.execPath) : projectRoot);
@@ -18,6 +19,8 @@ const accountsDir = path.join(dataDir, 'accounts');
 const usageDir = path.join(dataDir, 'usage');
 const portFile = path.join(dataDir, 'gateway.json');
 const PREFERRED_PORT = Number(process.env.WBSIM_PORT || 8787);
+const launchedAtLogin = (process.argv || []).includes('--autostart');
+const autostart = createAutostart({ app });
 
 let mainWindow = null;
 let gateway = null; // { port, host, child }
@@ -332,6 +335,23 @@ function showWindow() {
   mainWindow.focus();
 }
 
+function autostartStatus() {
+  try { return autostart.getStatus(); }
+  catch (error) {
+    log(`[autostart-read-error] ${error?.message || error}`);
+    return { supported: false, enabled: false };
+  }
+}
+
+function refreshAutostartMenu() {
+  const item = Menu.getApplicationMenu()?.getMenuItemById('startupAtLogin');
+  if (item) {
+    const status = autostartStatus();
+    item.checked = status.enabled;
+    item.enabled = status.supported;
+  }
+}
+
 async function createWindow(port) {
   mainWindow = new BrowserWindow({
     width: 1440,
@@ -341,8 +361,10 @@ async function createWindow(port) {
     title: `超级反代 v${app.getVersion()} — WorkBuddy Gateway`,
     backgroundColor: '#0f1115',
     autoHideMenuBar: false,
+    show: !launchedAtLogin,
     icon: path.join(projectRoot, 'assets', 'icon.ico'),
     webPreferences: {
+      preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
       sandbox: true,
       nodeIntegration: false,
@@ -381,9 +403,23 @@ if (!gotLock) {
 
   app.whenReady().then(async () => {
     try {
+      installAutostartIPC({
+        ipcMain, autostart, getWindow: () => mainWindow,
+        getOrigin: () => gateway ? `http://127.0.0.1:${gateway.port}` : null,
+        onChange: refreshAutostartMenu
+      });
+      const startup = autostartStatus();
       Menu.setApplicationMenu(Menu.buildFromTemplate([
         { label: '软件', submenu: [
           { label: `超级反代 v${app.getVersion()}`, enabled: false },
+          { id: 'startupAtLogin', label: '开机自启动', type: 'checkbox',
+            checked: startup.enabled, enabled: startup.supported,
+            click: item => {
+              try { autostart.setEnabled(item.checked); }
+              catch (error) { dialog.showErrorBox('开机自启动设置失败', error.message); }
+              finally { refreshAutostartMenu(); }
+            }
+          },
           { label: '检查桌面更新…', click: () => desktopUpdater.check(mainWindow) },
           { type: 'separator' },
           { label: '退出', click: () => { quitting = true; app.quit(); } }
@@ -393,6 +429,10 @@ if (!gotLock) {
       const info = await bootGateway();
       await createWindow(info.port);
       createTray(info.port);
+      // An autostart launch runs in the tray. Never leave it inaccessible if
+      // Windows cannot create the tray icon; manual launches always show it.
+      if (launchedAtLogin && !tray) showWindow();
+      if (launchedAtLogin) log(`[autostart-launch] gateway=${info.port} tray=${!!tray}`);
     } catch (error) {
       log(`[startup-error] ${error?.stack || error}`);
       dialog.showErrorBox('启动失败', `本地网关没能启动：${error?.message || error}\n\n详见 ${path.join(runtimeRoot, 'desktop-startup.log')}`);
