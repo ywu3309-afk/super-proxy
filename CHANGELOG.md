@@ -1,5 +1,13 @@
 # 更新记录
 
+## 1.5.0（TRAE 浏览器扫码授权与工具上下文修复）
+
+- TRAE 新增“扫码 / 浏览器授权”主入口，不要求本机安装 TRAE，也不再强制读取本机 TRAE 登录态；授权完成后自动回调并加入 TRAE 国内版账号池。
+- 新增 TRAE OAuth/PKCE 授权、AuthCode 换发、凭据自动刷新和 DPAPI 加密保存；Token、RefreshToken、设备私钥不会返回到前端或写入普通日志。
+- 保留“扫描本机 TRAE”作为兼容入口，并明确区分浏览器授权、远程文本调用和本机原生视觉/工具能力。
+- 修复 DSH 完全权限模式下大量工具定义触发 TRAE 原生上下文超限的问题；模型侧按预算渐进压缩工具描述，网关本地仍使用完整 schema 严格校验。
+- 新增 OAuth、授权回调、HTTP 管理路由和工具上下文回归测试。
+
 ## 1.4.0（融合 wb-proxy 的 TRAE 动态目录与远程 SSE）
 
 - 接入 `cty1735/wb-proxy` 当前使用的 `get_detail_param` 动态模型目录，按 `chat_v3`、`solo_agent`、`solo_coder` 合并模型，不再只依赖旧的五项 `model_list`。
