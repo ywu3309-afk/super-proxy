@@ -355,6 +355,27 @@ class ToolBridgeTests(unittest.TestCase):
                     {"role": "user", "content": "😀" * 33000}]
         self.assert_error(lambda: bridge.prepare(request(messages=messages)), "request_too_large", 413)
 
+    def test_huge_permission_set_falls_back_to_tool_index_instead_of_413(self):
+        tools = []
+        for index in range(128):
+            properties = {
+                "value_%03d" % field: {"type": "string"}
+                for field in range(20)
+            }
+            tools.append(tool(
+                "tool_%d" % index,
+                parameters={"type": "object", "properties": properties,
+                            "required": list(properties)}))
+        plan = bridge.prepare(request(tools=tools))
+        data = json.loads(plan.messages[1]["content"][0]["text"])
+        self.assertEqual(len(data["tools"]), 128)
+        self.assertEqual(data["tools"][0]["name"], "tool_0")
+        self.assertLessEqual(bridge._utf16_length("".join(
+            item["content"][0]["text"] for item in plan.messages)),
+            bridge.PROMPT_BUDGET_UTF16)
+        # Local validation still uses the original complete schema snapshot.
+        self.assertEqual(plan.parse(output(plan, content="你好"))["finish_reason"], "stop")
+
 
 if __name__ == "__main__":
     unittest.main()

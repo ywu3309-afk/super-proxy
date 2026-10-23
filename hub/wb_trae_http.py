@@ -46,6 +46,50 @@ def _error(handler, status, message, code="trae_error"):
                                            "type": "provider_error", "code": code}})
 
 
+def _callback_url(handler):
+    """Return the exact loopback callback shape accepted by TRAE."""
+    try:
+        port = int(handler.server.server_address[1])
+    except (AttributeError, TypeError, ValueError):
+        port = 0
+    return "http://127.0.0.1:%d/authorize" % port if port else ""
+
+
+def oauth_callback(handler, query, provider):
+    """Handle TRAE's public browser redirect without exposing credentials."""
+    params = {}
+    for key, values in (query or {}).items():
+        params[str(key)] = (values[-1] if isinstance(values, list) and values
+                            else values)
+    result = provider.complete_oauth_login(params)
+    ok = bool(result.get("ok"))
+    title = "TRAE 授权成功" if ok else "TRAE 授权失败"
+    message = ("账号已加入 TRAE 账号池，可以关闭此页回到网关。"
+               if ok else str(result.get("error") or "授权失败，请回到网关重试。"))
+    color = "#31d07c" if ok else "#ff6677"
+    icon = "✓" if ok else "×"
+    body = ("<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
+            "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+            "<title>%s</title></head><body style=\"margin:0;background:#0b111a;color:#eef5ff;"
+            "font-family:Segoe UI,Microsoft YaHei,sans-serif;display:flex;min-height:100vh;"
+            "align-items:center;justify-content:center\"><main style=\"width:min(520px,calc(100%% - 36px));"
+            "padding:38px 32px;border:1px solid #26364a;border-radius:18px;background:#111b29;"
+            "text-align:center;box-shadow:0 18px 60px #0008\"><div style=\"font-size:48px;"
+            "color:%s\">%s</div><h1 style=\"font-size:22px;margin:12px 0;color:%s\">%s</h1>"
+            "<p style=\"line-height:1.8;color:#a9b7c8;margin:0\">%s</p>"
+            "<p style=\"font-size:12px;color:#6f8094;margin-top:24px\">TRAE 浏览器授权 · 可安全关闭此页</p>"
+            "</main></body></html>" % (
+                title, color, icon, color, title, message))
+    data = body.encode("utf-8")
+    handler.send_response(200 if ok else 400)
+    handler.send_header("Content-Type", "text/html; charset=utf-8")
+    handler.send_header("Content-Length", str(len(data)))
+    handler.send_header("Cache-Control", "no-store")
+    handler.end_headers()
+    handler.wfile.write(data)
+    handler.wfile.flush()
+
+
 def _local_management(handler, write=False):
     try:
         local = ipaddress.ip_address(handler.client_address[0]).is_loopback
@@ -87,13 +131,23 @@ def management(handler, path, provider, write=False):
         return
     try:
         if not write:
-            if path != PREFIX:
-                return _error(handler, 404, "provider route not found", "not_found")
-            return _json(handler, 200, provider.status())
+            if path == PREFIX:
+                return _json(handler, 200, provider.status())
+            if path == PREFIX + "/login/poll":
+                query = urlsplit("http://localhost" + handler.path).query
+                from urllib.parse import parse_qs
+                values = parse_qs(query, keep_blank_values=True)
+                state = (values.get("state") or [""])[-1]
+                return _json(handler, 200, provider.poll_oauth_login(state))
+            return _error(handler, 404, "provider route not found", "not_found")
         payload = handler._payload_or_error()
         if payload is None:
             return
         actions = {
+            PREFIX + "/login/start": lambda: provider.start_oauth_login(
+                _callback_url(handler), payload.get("realm") or "cn"),
+            PREFIX + "/login/cancel": lambda: {
+                "cancelled": provider.cancel_oauth_login(payload.get("state"))},
             PREFIX + "/import": lambda: provider.import_account(payload),
             PREFIX + "/scan": provider.import_local,
             PREFIX + "/refresh": lambda: provider.refresh(payload.get("id")),

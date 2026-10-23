@@ -212,6 +212,51 @@ def _compact_prompt_tools(tools, *, choice, forced, level):
     return result
 
 
+def _index_prompt_tools(tools, *, choice, forced, minimal=False):
+    """Build a tiny model-facing tool index for the last-resort path.
+
+    The complete schemas stay in ``ToolPlan.schemas`` for local validation;
+    this representation is only what TRAE sees when even the compact schema
+    variants exceed its native UTF-16 prompt ceiling.  Keeping names and a
+    small argument-shape hint lets a model answer ordinary greetings without
+    a 413 and still choose a plausible tool on a later turn.
+    """
+    if choice == "none":
+        return []
+    selected = tools
+    if choice == "forced" and forced:
+        selected = [tool for tool in tools
+                    if isinstance(tool, dict)
+                    and isinstance(tool.get("function"), dict)
+                    and tool["function"].get("name") == forced]
+    result = []
+    for tool in selected:
+        fn = tool.get("function", {}) if isinstance(tool, dict) else {}
+        name = fn.get("name")
+        if not isinstance(name, str):
+            continue
+        item = {"name": name}
+        if not minimal:
+            description = fn.get("description")
+            if isinstance(description, str) and description.strip():
+                item["description"] = " ".join(description.split())[:96]
+            schema = fn.get("parameters")
+            if isinstance(schema, dict):
+                properties = schema.get("properties")
+                if isinstance(properties, dict) and properties:
+                    hints = {}
+                    for key, value in list(properties.items())[:12]:
+                        if isinstance(key, str) and isinstance(value, dict):
+                            hints[key] = value.get("type", "any")
+                    if hints:
+                        item["arguments"] = hints
+                required = schema.get("required")
+                if isinstance(required, list) and required:
+                    item["required"] = [str(key) for key in required[:12]]
+        result.append(item)
+    return result
+
+
 def _reject_constant(_value):
     raise ValueError("non-finite JSON constant")
 
@@ -705,6 +750,8 @@ def prepare(payload, *, force_framed=None):
             _compact_prompt_tools(tools, choice=choice, forced=forced, level=1),
             _compact_prompt_tools(tools, choice=choice, forced=forced, level=2),
             _compact_prompt_tools(tools, choice=choice, forced=forced, level=3),
+            _index_prompt_tools(tools, choice=choice, forced=forced),
+            _index_prompt_tools(tools, choice=choice, forced=forced, minimal=True),
         ])
 
     data = None

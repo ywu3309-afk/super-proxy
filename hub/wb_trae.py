@@ -26,6 +26,7 @@ import uuid
 from wb_trae_catalog import read_local_model_catalog
 from wb_trae_native import NativeTraeClient, NativeBridgeError
 from wb_trae_tools import prepare as prepare_tools, ToolBridgeError
+import wb_trae_oauth as trae_oauth
 from wb_trae_remote import (
     MODEL_FUNCTIONS as REMOTE_MODEL_FUNCTIONS,
     catalog_headers as remote_catalog_headers,
@@ -364,6 +365,13 @@ class TraeProvider:
         # can still do so without changing account storage.
         self._remote_catalog = remote_catalog is True
         self._cursor = 0
+        # Browser login state is intentionally process-local.  The state holds
+        # only the PKCE verifier/device proof material needed to finish one
+        # short-lived OAuth attempt; tokens are written only through the
+        # DPAPI-protected account store after the callback is verified.
+        self._oauth_lock = threading.RLock()
+        self._oauth_logins = {}
+        self._oauth_ttl = 10 * 60
 
     @staticmethod
     def _metric_int(value):
@@ -514,6 +522,8 @@ class TraeProvider:
                             continue
                         if not isinstance(row.get("label", ""), str) or not isinstance(row.get("secret"), str):
                             continue
+                        if str(row.get("region", "cn")).lower() not in ("cn", "intl"):
+                            continue
                         if not isinstance(row.get("status", ""), str) or not isinstance(row.get("creditDetails", []), list):
                             continue
                         result.append(row)
@@ -609,6 +619,191 @@ class TraeProvider:
                 pass
         return {"installed": False, "version": None, "path": None}
 
+    @staticmethod
+    def _oauth_uid(token, fallback=""):
+        """Extract only the stable subject from a JWT; never expose claims."""
+        value = str(fallback or "").strip()
+        if value:
+            return value[:128]
+        try:
+            parts = str(token or "").split(".")
+            if len(parts) < 2:
+                return ""
+            raw = parts[1] + "=" * (-len(parts[1]) % 4)
+            claims = json.loads(base64.urlsafe_b64decode(raw.encode("ascii")))
+            if isinstance(claims, dict):
+                data = claims.get("data") if isinstance(claims.get("data"), dict) else {}
+                for key in ("userId", "uid", "sub", "id"):
+                    item = data.get(key) or claims.get(key)
+                    if isinstance(item, (str, int)) and str(item).strip():
+                        return str(item).strip()[:128]
+        except (ValueError, TypeError, UnicodeError, json.JSONDecodeError,
+                RecursionError):
+            pass
+        return ""
+
+    def _oauth_prune(self, now=None):
+        now = time.time() if now is None else float(now)
+        with self._oauth_lock:
+            for key, item in list(self._oauth_logins.items()):
+                created = float(item.get("created") or 0)
+                if now - created > self._oauth_ttl:
+                    self._oauth_logins.pop(key, None)
+
+    def start_oauth_login(self, callback_url, realm="cn"):
+        """Start a browser/QR login without requiring the TRAE desktop app."""
+        realm = str(realm or "cn").strip().lower()
+        if realm != "cn":
+            raise TraeError(422, "TRAE 版本无效。", "unsupported_region")
+        callback = trae_oauth.normalize_oauth_callback(callback_url)
+        if not callback:
+            raise TraeError(400, "无法生成 TRAE 本地授权回调地址。", "oauth_callback_invalid")
+        self._oauth_prune()
+        try:
+            # Browser/QR login is deliberately independent from the desktop
+            # client.  Do not scan storage.json or reuse a stale native device
+            # identity for this path; the OAuth helper creates a gateway-owned
+            # device identity and still keeps native scan as a compatibility
+            # action below the same page.
+            device = trae_oauth.oauth_device(realm, prefer_local=False)
+            started = trae_oauth.oauth_login_url(realm, callback, device=device)
+        except Exception as exc:
+            # Do not echo device keys or authorization material in the panel.
+            raise TraeError(502, "无法生成 TRAE 浏览器授权链接。", "oauth_start_failed") from exc
+        state = str(started.get("state") or "").strip()
+        auth_url = str(started.get("authUrl") or "").strip()
+        if not state or not auth_url:
+            raise TraeError(502, "TRAE 授权服务没有返回有效链接。", "oauth_start_failed")
+        with self._oauth_lock:
+            self._oauth_logins[state] = {
+                "created": time.time(),
+                "realm": realm,
+                "verifier": str(started.get("verifier") or ""),
+                "deviceId": str(started.get("deviceId") or ""),
+                "machineId": str(started.get("machineId") or ""),
+                "publicKeyPEM": str(started.get("publicKeyPEM") or ""),
+                "privateKeyPEM": str(started.get("privateKeyPEM") or ""),
+                "appVersion": str(started.get("appVersion") or ""),
+                "callbackUrl": callback,
+                "status": "pending",
+            }
+        return {
+            "state": state,
+            "authUrl": auth_url,
+            "realm": realm,
+            "provider": "trae",
+            "redirectUri": callback,
+            "expiresAt": int(time.time() + self._oauth_ttl),
+        }
+
+    def _oauth_result(self, state, result):
+        with self._oauth_lock:
+            item = self._oauth_logins.get(state)
+            if item is None:
+                return
+            item["status"] = "ok" if result.get("ok") else "error"
+            item["result"] = {
+                "status": item["status"],
+                "account": result.get("account") if result.get("ok") else None,
+                "message": result.get("error") if not result.get("ok") else "",
+            }
+            # Keep a completed attempt briefly so the browser page and the
+            # dashboard poll can both observe the same result.
+            item["created"] = time.time() - self._oauth_ttl + 300
+
+    def complete_oauth_login(self, params):
+        """Consume the official callback and add the account to the TRAE pool."""
+        self._oauth_prune()
+        try:
+            callback = trae_oauth.parse_oauth_callback(params)
+        except Exception:
+            return {"ok": False, "error": "TRAE 授权回调格式无效。"}
+        state = str(callback.get("loginTraceID") or "").strip()
+        with self._oauth_lock:
+            item = dict(self._oauth_logins.get(state) or {}) if state else {}
+        if not item or item.get("status") not in (None, "pending"):
+            return {"ok": False, "error": "授权会话不存在或已过期，请重新发起。"}
+        if time.time() - float(item.get("created") or 0) > self._oauth_ttl:
+            with self._oauth_lock:
+                self._oauth_logins.pop(state, None)
+            return {"ok": False, "error": "授权会话已过期，请重新发起。"}
+        realm = str(item.get("realm") or "cn")
+        device = {
+            "deviceId": item.get("deviceId") or "",
+            "machineId": item.get("machineId") or "",
+            "publicKeyPEM": item.get("publicKeyPEM") or "",
+            "privateKeyPEM": item.get("privateKeyPEM") or "",
+            "appVersion": item.get("appVersion") or "",
+        }
+        token = str(callback.get("accessToken") or "").strip()
+        refresh = str(callback.get("refreshToken") or "").strip()
+        try:
+            if not token and callback.get("authCode"):
+                exchanged = trae_oauth.exchange_auth_code(
+                    callback["authCode"], item.get("verifier") or "",
+                    callback.get("host") or "", device, realm=realm)
+                token = str(exchanged.get("accessToken") or "").strip()
+                refresh = str(exchanged.get("refreshToken") or refresh).strip()
+                expires_at = exchanged.get("expiresAt") or 0
+                refresh_expired_at = exchanged.get("refreshExpiredAt") or 0
+            else:
+                expires_at = 0
+                refresh_expired_at = 0
+            if not token:
+                raise ValueError("回调里没有可用的授权令牌")
+            uid = self._oauth_uid(token, callback.get("userId"))
+            label = str(callback.get("userName") or uid or "TRAE CN")[:80]
+            result = self.import_account({
+                "oauth": True,
+                "source": "oauth",
+                "region": realm,
+                "label": label,
+                "account": {"uid": uid, "nickname": label},
+                "auth": {
+                    "accessToken": token,
+                    "refreshToken": refresh,
+                    "expiresAt": expires_at,
+                    "uid": uid,
+                    "userId": uid,
+                    "deviceId": device.get("deviceId") or "",
+                    "machineId": device.get("machineId") or "",
+                    "devicePublicKey": device.get("publicKeyPEM") or "",
+                    "privateKeyPEM": device.get("privateKeyPEM") or "",
+                    "appVersion": device.get("appVersion") or "",
+                    "userRegion": callback.get("userRegion") or "",
+                    "refreshExpiredAt": refresh_expired_at,
+                },
+            })
+            account = next((row for row in result.get("accounts", [])
+                            if row.get("label") == label), None)
+            response = {"ok": True, "account": account or {"label": label, "uid": uid}}
+            self._oauth_result(state, response)
+            return response
+        except Exception:
+            response = {"ok": False, "error": "TRAE 授权交换失败，请重新发起授权。"}
+            self._oauth_result(state, response)
+            return response
+
+    def poll_oauth_login(self, state):
+        state = str(state or "").strip()
+        self._oauth_prune()
+        with self._oauth_lock:
+            item = self._oauth_logins.get(state)
+            if item is None:
+                return {"status": "unknown", "message": "授权会话不存在，请重新发起。"}
+            status = item.get("status", "pending")
+            result = dict(item.get("result") or {})
+        if status == "ok":
+            return {"status": "ok", "account": result.get("account"), "provider": self.status()}
+        if status == "error":
+            return {"status": "error", "message": result.get("message") or "授权失败。"}
+        return {"status": "pending", "message": "等待浏览器授权 / 扫码完成。"}
+
+    def cancel_oauth_login(self, state):
+        state = str(state or "").strip()
+        with self._oauth_lock:
+            return self._oauth_logins.pop(state, None) is not None
+
     def status(self):
         with self._lock:
             rows = self._records()
@@ -617,7 +812,7 @@ class TraeProvider:
             for row in rows:
                 expired = bool(row.get("expiresAt") and row["expiresAt"] <= time.time() + 10)
                 accounts.append({"id": row["id"], "label": row.get("label", "TRAE"),
-                    "region": "cn", "enabled": row.get("enabled") is True,
+                    "region": str(row.get("region") or "cn"), "enabled": row.get("enabled") is True,
                     "status": "login_expired" if expired else row.get("status", "imported"), "credits": row.get("credits"),
                     "lastError": "TRAE 登录已失效，请在 TRAE 内刷新后重新同步。" if expired else row.get("lastError"), "updatedAt": row.get("updatedAt"),
                     "expiresAt": row.get("expiresAt"), "creditDetails": row.get("creditDetails", []),
@@ -663,8 +858,10 @@ class TraeProvider:
         if not isinstance(auth, dict) or not isinstance(account, dict):
             raise TraeError(400, "TRAE 账号 JSON 格式无效。", "invalid_import")
         region = str(payload.get("region", "cn")).lower()
-        if region not in ("cn", "china"):
-            raise TraeError(422, "首版仅支持 TRAE CN 国内版。", "unsupported_region")
+        if region in ("china", "cn"):
+            region = "cn"
+        else:
+            raise TraeError(422, "TRAE 版本无效。", "unsupported_region")
         for key in ("apiHost", "host", "baseURL", "base_url", "agentHost"):
             value = auth.get(key, payload.get(key))
             if value:
@@ -680,18 +877,33 @@ class TraeProvider:
         uid = str(account.get("uid") or auth.get("uid") or "")[:128]
         if uid and not re.fullmatch(r"[A-Za-z0-9._:@-]{1,128}", uid):
             raise TraeError(400, "TRAE 账号用户标识无效。", "invalid_import")
-        account_id = hashlib.sha256(("cn:" + (uid or token)).encode()).hexdigest()[:24]
+        account_id = hashlib.sha256((region + ":" + (uid or token)).encode()).hexdigest()[:24]
         credentials = {"token": token}
-        # Never rotate/copy the client's refresh token or device private key.
+        oauth_managed = bool(payload.get("oauth")) or str(payload.get("source") or "") == "oauth"
+        # Manual JWT import keeps the historical narrow credential surface.
+        # Browser OAuth accounts additionally retain the refresh/device fields
+        # inside the DPAPI envelope so they can refresh without the desktop app.
         for key in ("machineId", "deviceId"):
             value = auth.get(key, "")
             if isinstance(value, str) and value and len(value) <= 16384 and not any(ord(c) < 32 for c in value):
                 credentials[key] = value
+        if oauth_managed:
+            refresh = auth.get("refreshToken", "")
+            if isinstance(refresh, str) and refresh and _TOKEN.fullmatch(refresh):
+                credentials["refreshToken"] = refresh
+            for key in ("devicePublicKey", "privateKeyPEM", "appVersion", "userRegion"):
+                value = auth.get(key, "")
+                if isinstance(value, str) and value and len(value) <= 64 * 1024 and not any(ord(c) < 32 for c in value):
+                    credentials[key] = value
+            for key in ("refreshExpiredAt", "tokenReleaseAt"):
+                value = _expires(auth.get(key, 0))
+                if value:
+                    credentials[key] = value
         if uid:
             credentials["uid"] = uid
         with self._account_lock(account_id), self._lock:
             existing = next((r for r in self._records() if r["id"] == account_id), {})
-            row = {"schemaVersion": 1, "id": account_id, "label": label, "region": "cn", "enabled": True,
+            row = {"schemaVersion": 1, "id": account_id, "label": label, "region": region, "enabled": True,
                 "status": "imported", "credits": existing.get("credits"), "lastError": None,
                 "models": existing.get("models", []), "updatedAt": int(time.time()),
                 "expiresAt": _expires(auth.get("expiresAt", auth.get("expiredAt", 0))),
@@ -1045,10 +1257,43 @@ class TraeProvider:
             details.append(detail)
         return (total if details else None), details
 
-    @staticmethod
-    def _check_expiry(row):
-        if row.get("expiresAt") and row["expiresAt"] <= time.time() + 10:
-            raise TraeError(401, "TRAE 登录已失效，请在 TRAE 内刷新后重新同步。", "login_expired")
+    def _check_expiry(self, row):
+        if not row.get("expiresAt") or row["expiresAt"] > time.time() + 60:
+            return
+        try:
+            credentials = self._credentials(row)
+        except TraeError:
+            raise
+        refresh = credentials.get("refreshToken")
+        if not refresh:
+            raise TraeError(401, "TRAE 登录已失效，请重新浏览器授权。", "login_expired")
+        try:
+            refreshed = trae_oauth.refresh_credential(
+                str(row.get("region") or "cn"),
+                {"refreshToken": refresh,
+                 "deviceId": credentials.get("deviceId", ""),
+                 "machineId": credentials.get("machineId", ""),
+                 "privateKeyPEM": credentials.get("privateKeyPEM", ""),
+                 "appVersion": credentials.get("appVersion", "")},
+                refresh,
+            )
+            token = str(refreshed.get("accessToken") or "").strip()
+            if not token:
+                raise ValueError("empty access token")
+            updated = dict(credentials)
+            updated["token"] = token
+            if refreshed.get("refreshToken"):
+                updated["refreshToken"] = str(refreshed["refreshToken"])
+            expiry = _expires(refreshed.get("expiresAt"))
+            if expiry:
+                row["expiresAt"] = expiry
+            row["secret"] = self._protect(updated)
+            row["status"] = "imported"
+            row["lastError"] = None
+            row["updatedAt"] = int(time.time())
+            self._save(row)
+        except Exception as exc:
+            raise TraeError(401, "TRAE 登录已失效，请重新浏览器授权。", "login_expired") from exc
 
     @staticmethod
     def _model_name(payload):

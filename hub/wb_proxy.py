@@ -17458,6 +17458,13 @@ class Handler(BaseHTTPRequestHandler):
         # same wb_agents.py shipped in the repository, no secrets inside).
         if path == "/agents/cli":
             return self._get_agents_cli()
+        # TRAE's official browser login redirects to this loopback endpoint.
+        # It is intentionally public, but the provider only accepts callbacks
+        # carrying a live in-process OAuth state, so an arbitrary URL cannot
+        # add an account or exchange a token.
+        if path == "/authorize":
+            return wb_trae_http.oauth_callback(
+                self, query, wb_trae_http.provider_for(ACCOUNTS_DIR))
         if self._is_panel_route(path) and not self._panel_ok():
             return self._error(401, "panel password required", "invalid_request_error")
         if path == "/providers/trae" or path.startswith("/providers/trae/"):

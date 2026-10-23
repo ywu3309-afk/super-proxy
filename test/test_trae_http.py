@@ -24,6 +24,7 @@ class Provider:
     def __init__(self):
         self.calls = []
         self.fail = None
+        self.oauth_state = "oauth-fixture"
 
     def status(self):
         return {"provider": "trae", "accounts": [], "models": self.models(), "client": {"installed": False}}
@@ -50,6 +51,28 @@ class Provider:
     def remove_account(self, account_id):
         self.calls.append(("remove", account_id))
         return self.status()
+
+    def start_oauth_login(self, callback_url, realm="cn"):
+        self.calls.append(("login_start", callback_url, realm))
+        return {
+            "state": self.oauth_state,
+            "authUrl": "https://www.trae.cn/authorization?fixture=1",
+            "redirectUri": callback_url,
+            "provider": "trae",
+            "realm": realm,
+        }
+
+    def poll_oauth_login(self, state):
+        self.calls.append(("login_poll", state))
+        return {"status": "pending", "message": "等待浏览器授权 / 扫码完成。"}
+
+    def cancel_oauth_login(self, state):
+        self.calls.append(("login_cancel", state))
+        return state == self.oauth_state
+
+    def complete_oauth_login(self, params):
+        self.calls.append(("login_callback", params))
+        return {"ok": False, "error": "授权会话不存在或已过期，请重新发起。"}
 
     def chat(self, payload):
         self.calls.append(("chat",))
@@ -145,6 +168,25 @@ class HTTPTests(unittest.TestCase):
         for action, payload in (("import", {"token": "fixture-not-a-secret"}), ("refresh", {"id": "fixture"}), ("toggle", {"id": "fixture", "enabled": False}), ("remove", {"id": "fixture"})):
             self.assertEqual(self.request("POST", "/providers/trae/" + action, payload, {"X-Panel-Token": "fixture-panel"})[0], 200)
         self.assertEqual([row[0] for row in self.provider.calls], ["import", "refresh", "toggle", "remove"])
+
+    def test_browser_oauth_start_poll_and_cancel_stay_on_loopback(self):
+        headers = {"X-Panel-Token": "fixture-panel", "Origin": "http://127.0.0.1:%d" % self.port}
+        status, _, text = self.request("POST", "/providers/trae/login/start", {"realm": "cn"}, headers)
+        self.assertEqual(status, 200)
+        started = json.loads(text)
+        self.assertEqual(started["redirectUri"], "http://127.0.0.1:%d/authorize" % self.port)
+        self.assertEqual(self.provider.calls[0][0], "login_start")
+        self.assertEqual(self.request("GET", "/providers/trae/login/poll?state=oauth-fixture", headers={"X-Panel-Token": "fixture-panel"})[0], 200)
+        status, _, text = self.request("POST", "/providers/trae/login/cancel", {"state": "oauth-fixture"}, headers)
+        self.assertEqual(status, 200)
+        self.assertTrue(json.loads(text)["cancelled"])
+
+    def test_browser_oauth_callback_never_adds_without_live_state(self):
+        status, headers, text = self.request("GET", "/authorize?loginTraceID=unknown&AuthCode=fixture")
+        self.assertEqual(status, 400)
+        self.assertIn("TRAE 授权失败", text)
+        self.assertEqual(headers["Cache-Control"], "no-store")
+        self.assertEqual(self.provider.calls[-1][0], "login_callback")
 
     def test_chat_requires_api_authorization(self):
         self.assertEqual(self.request("POST", "/v1/chat/completions", {"model": "trae/mock-text", "messages": []})[0], 401)

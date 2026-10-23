@@ -3615,10 +3615,12 @@ html[data-theme-style="cyber"] .dot{animation:cyberPulse 2.4s ease-in-out infini
     <section id="traeAccountsSection">
       <h2>TRAE 账号</h2>
       <div class="toolbar">
+        <button type="button" class="primary" data-trae-action onclick="startTraeOAuth()">扫码 / 浏览器授权 TRAE</button>
         <button type="button" data-trae-action onclick="traeProviderAction('scan', {})">扫描本机 TRAE</button>
         <button type="button" class="sec" data-trae-action onclick="traeProviderAction('refresh', {})">刷新额度 / 模型</button>
       </div>
-      <p class="trae-note">点击扫描仅导入本机已登录的 TRAE；刷新仅查询额度和模型，不发送对话。</p>
+      <p class="trae-note">优先使用“扫码 / 浏览器授权”：不要求本机安装 TRAE，授权完成后账号会自动加入当前 TRAE 国内版账号池。扫描本机仅作为兼容入口。</p>
+      <div id="traeOAuthBox" class="trae-note" style="display:none;margin:10px 0;padding:12px 14px;border:1px solid var(--line);border-radius:10px;background:rgba(70,130,255,.08)"></div>
       <div id="traeAccounts" class="trae-account-grid"><div class="trae-empty">加载 TRAE 状态中…</div></div>
       <details class="trae-import">
         <summary>手动导入登录凭据</summary>
@@ -12539,6 +12541,62 @@ function traeSetBusy(busy){
   page.querySelectorAll('[data-trae-action],.trae-import-form input').forEach(el => { el.disabled = busy; });
 }
 
+async function startTraeOAuth(){
+  if(TRAE_BUSY) return;
+  const box = document.getElementById('traeOAuthBox');
+  traeSetBusy(true);
+  traeSetStatus('正在生成 TRAE 浏览器授权链接…');
+  try{
+    const started = await traeRequest('/providers/trae/login/start', {realm:'cn'});
+    const state = String(started.state || '');
+    const url = String(started.authUrl || '');
+    if(!state || !url) throw new Error('授权服务没有返回有效链接');
+    if(box){
+      box.style.display = 'block';
+      box.innerHTML = '<strong>第 1 步：</strong>点击下面链接，在 TRAE 页面扫码或登录。<br>'
+        + '<a href="' + esc(url) + '" target="_blank" rel="noopener" style="word-break:break-all">打开 TRAE 授权页</a>'
+        + '<br><span id="traeOAuthPollText">第 2 步：等待授权完成…</span>'
+        + '<button type="button" class="sec mini" style="margin-left:10px" onclick="cancelTraeOAuth()">取消</button>';
+    }
+    traeSetStatus('等待 TRAE 浏览器 / 扫码授权…');
+    window.__traeOAuthState = state;
+    const deadline = Date.now() + 10 * 60 * 1000;
+    while(window.__traeOAuthState === state && Date.now() < deadline){
+      await new Promise(resolve => setTimeout(resolve, 1200));
+      const result = await traeRequest('/providers/trae/login/poll?state=' + encodeURIComponent(state));
+      if(result.status === 'ok'){
+        traeSetStatus('授权成功，TRAE 账号已加入账号池。');
+        window.__traeOAuthState = '';
+        if(box) box.style.display = 'none';
+        const data = await traeRequest('/providers/trae');
+        renderTraeProvider(data);
+        return;
+      }
+      if(result.status === 'error' || result.status === 'expired' || result.status === 'unknown'){
+        throw new Error(result.message || '授权失败');
+      }
+      const text = document.getElementById('traeOAuthPollText');
+      if(text) text.textContent = '第 2 步：等待授权完成…（仍在等待）';
+    }
+    throw new Error('授权等待超时，请重新发起');
+  }catch(e){
+    traeSetStatus('TRAE 浏览器授权失败：' + e.message, true);
+    if(box){ box.style.display = 'block'; box.textContent = '授权失败：' + e.message; }
+  }finally{
+    traeSetBusy(false);
+  }
+}
+
+async function cancelTraeOAuth(){
+  const state = window.__traeOAuthState;
+  window.__traeOAuthState = '';
+  if(state){ try{ await traeRequest('/providers/trae/login/cancel', {state}); }catch(e){} }
+  const box = document.getElementById('traeOAuthBox');
+  if(box) box.style.display = 'none';
+  traeSetBusy(false);
+  traeSetStatus('已取消 TRAE 浏览器授权。');
+}
+
 function traeCreditLabel(value){
   const credit = traeCredits(value);
   return credit === null ? traeText('未查询') : credit.toLocaleString(undefined, {maximumFractionDigits:6});
@@ -12604,8 +12662,8 @@ function renderTraeDiagnostics(data){
     klass = 'ok'; title = '当前使用上游动态目录';
     detail = '目录来自 TRAE 当前 get_detail_param 接口，不依赖本机旧缓存；启动官方 TRAE CN 后可切换到原生模型和视觉 / 工具能力。';
   }else if(!client.installed){
-    klass = 'error'; title = '未检测到官方 TRAE CN';
-    detail = '网关只能显示兼容目录，无法读取最新模型。请在这台电脑安装并启动官方 TRAE CN，再重新扫描。';
+    klass = remote ? 'ok' : 'warn'; title = remote ? '浏览器授权 / 上游目录可用' : '未连接本机 TRAE';
+    detail = remote ? '当前账号已通过网关直连 TRAE 上游，不要求本机安装官方客户端；原生视觉 / 工具能力仍可在安装客户端后启用。' : '不需要安装客户端也能使用浏览器授权：点击“扫码 / 浏览器授权 TRAE”，授权后账号会自动加入账号池。';
   }else if(legacy){
     klass = 'warn'; title = '当前正在使用旧接口目录';
     detail = '这不是旧安装目录，而是 TRAE CN 没有连接成功或登录账号不一致。启动 TRAE CN，登录与网关所选账号相同的账号后，点击“刷新额度 / 模型”。';
@@ -12734,7 +12792,7 @@ function renderTraeProvider(data){
       + '<div class="trae-note">' + esc(traeText('目录来源')) + ' · ' + esc(traeSourceLabel(a.catalogSource)) + '</div>'
       + '<div class="trae-note">' + esc(traeText('目录刷新时间')) + ' · <span data-no-i18n>' + esc(a.catalogFetchedAt || traeText('未查询')) + '</span></div>'
       + (a.catalogAgeSeconds !== null ? '<div class="trae-note">' + esc(traeText('目录年龄')) + ' · <span data-no-i18n>' + esc(a.catalogAgeSeconds.toLocaleString()) + '</span> ' + esc(traeText('秒')) + '</div>' : '')
-      + '<div class="trae-note">' + esc(traeText('原生上次刷新')) + ' · ' + esc(traeText(a.nativeConnected === true ? '成功（非实时状态）' : a.nativeConnected === false ? '未连接' : '未查询')) + '</div>'
+      + '<div class="trae-note">' + esc(traeText('原生上次刷新')) + ' · ' + esc(traeText(a.nativeConnected === true ? '成功（非实时状态）' : a.nativeConnected === false ? '未连接（不影响浏览器授权 / 远程文本）' : '未查询')) + '</div>'
       + (a.catalogSource === 'local_client_cache' ? '<div class="trae-note">' + esc(traeText('仅目录，需运行本机 TRAE')) + '</div>' : '')
       + (a.nativeError ? '<div class="trae-account-error">' + esc(traeText('原生刷新失败')) + ' · <span data-no-i18n>' + esc(a.nativeError) + '</span></div>' : '')
       + (a.expiresAt ? '<div class="trae-note">登录有效期 · <span data-no-i18n>' + esc(a.expiresAt) + '</span></div>' : '')
