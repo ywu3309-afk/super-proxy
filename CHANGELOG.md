@@ -1,5 +1,13 @@
 # 更新记录
 
+## 1.4.0（融合 wb-proxy 的 TRAE 动态目录与远程 SSE）
+
+- 接入 `cty1735/wb-proxy` 当前使用的 `get_detail_param` 动态模型目录，按 `chat_v3`、`solo_agent`、`solo_coder` 合并模型，不再只依赖旧的五项 `model_list`。
+- TRAE 网关默认优先读取上游动态目录；动态接口临时不可用时保留旧接口作为最后兼容回退，并在看板明确显示目录来源。
+- 补齐现代 TRAE SSE 的 `metadata`、`timing_cost`、`extra_info`、`output`、`token_usage` 和 `done` 事件解析，兼容嵌套 usage 字段与 `content/text/reasoning` 输出。
+- 远程动态模型支持普通文本请求直连 `llm_utils_chat`；原生 TRAE CN 路径继续保留 `deepseek-v4.1-flash` 图片与工具桥接，不把不支持的远程图片/工具请求静默降级。
+- 更新 TRAE 请求头与版本标识，避免旧客户端标识导致模型目录过期或触发渠道校验；新增动态目录和远程 DeepSeek 文本回归测试。
+
 ## 1.3.5（DSH 首局提示兼容）
 
 - 只在请求开头连续的 system/developer 初始指令块中，将会触发 WorkBuddy 渠道校验的 `DeepSeek Harness` 品牌句改写为 `DeepSeek`；不修改用户正文、工具参数、图片 URL、文件路径、历史消息或其它字段。
