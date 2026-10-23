@@ -21,7 +21,10 @@ def provider_for(accounts_dir):
     root = str(Path(accounts_dir).resolve().parent)
     with _PROVIDERS_LOCK:
         if root not in _PROVIDERS:
-            _PROVIDERS[root] = wb_trae.TraeProvider(root)
+            # Use the live TRAE catalog adapter in the desktop gateway. Unit
+            # tests may still instantiate TraeProvider with the legacy switch
+            # disabled to exercise the old endpoint deterministically.
+            _PROVIDERS[root] = wb_trae.TraeProvider(root, remote_catalog=True)
         return _PROVIDERS[root]
 
 

@@ -26,6 +26,13 @@ import uuid
 from wb_trae_catalog import read_local_model_catalog
 from wb_trae_native import NativeTraeClient, NativeBridgeError
 from wb_trae_tools import prepare as prepare_tools, ToolBridgeError
+from wb_trae_remote import (
+    MODEL_FUNCTIONS as REMOTE_MODEL_FUNCTIONS,
+    catalog_headers as remote_catalog_headers,
+    normalise_payloads as normalise_remote_catalog,
+    request_body as remote_catalog_request_body,
+    to_gateway_models as remote_gateway_models,
+)
 
 
 class TraeError(Exception):
@@ -256,9 +263,15 @@ def _safe_url(url):
 
 
 def _upstream_error(status, body=None):
+    if isinstance(body, dict) and isinstance(body.get("data"), dict):
+        body = {**body, **body["data"]}
     code = body.get("code") if isinstance(body, dict) else None
     if code in (1005, 4008, "1005", "4008"):
         return TraeError(402, "TRAE 积分或套餐权益不足。", "credits_exhausted")
+    if code in (4015, "4015"):
+        return TraeError(403, "TRAE 风控拒绝了当前账号或出口，请更换账号或稍后重试。", "access_denied")
+    if code in (4001, 2001, "4001", "2001"):
+        return TraeError(400, "TRAE 请求参数或工具协议不兼容。", "invalid_request")
     if status == 401:
         return TraeError(401, "TRAE 登录已失效，请重新导入账号。", "login_expired")
     if status == 403:
@@ -329,7 +342,7 @@ def _decode_event(event, lines):
 
 class TraeProvider:
     def __init__(self, data_root, *, opener=None, protector=None, local_reader=None,
-                 native_client=None, catalog_reader=None):
+                 native_client=None, catalog_reader=None, remote_catalog=False):
         self.root = Path(data_root).resolve() / "trae"
         # Request telemetry is deliberately separate from account records.  It
         # contains only local, non-secret counters used by the TRAE panel; no
@@ -345,6 +358,11 @@ class TraeProvider:
         self._local_reader = local_reader or read_local_account
         self._native = native_client if native_client is not None else NativeTraeClient()
         self._catalog_reader = catalog_reader or read_local_model_catalog
+        # The upstream wb-proxy implementation now reads the live
+        # get_detail_param catalog.  Keep the switch injectable so offline
+        # contract tests and operators that intentionally pin the old endpoint
+        # can still do so without changing account storage.
+        self._remote_catalog = remote_catalog is True
         self._cursor = 0
 
     @staticmethod
@@ -714,11 +732,16 @@ class TraeProvider:
 
     def _headers(self, credentials, stream=False, raw_chat_function=None):
         version = self._client().get("version") or "3.4.4"
+        # Match the current upstream client headers.  The old Trae/<version>
+        # user agent can be rate-limited (4011) and may receive an old catalog.
+        user_agent = os.environ.get("TRAE_USER_AGENT") or "VSCode 1.107.1 (TRAE SOLO CN)"
+        ide_version = os.environ.get("TRAE_IDE_VERSION") or version
+        ide_version_code = os.environ.get("TRAE_IDE_VERSION_CODE") or "20260401"
         request_id = uuid.uuid4().hex
         trace_id = uuid.uuid4().hex
         span_id = uuid.uuid4().hex[:16]
         headers = {"Content-Type": "application/json", "Accept": "text/event-stream" if stream else "application/json",
-            "User-Agent": "Trae/" + version, "Authorization": "Cloud-IDE-JWT " + credentials["token"],
+            "User-Agent": user_agent, "Authorization": "Cloud-IDE-JWT " + credentials["token"],
             "X-User-Region": "CN", "Connection": "keep-alive",
             "X-Request-Id": request_id, "X-Custom-Trace-Id": trace_id,
             "X-Flow-Traceparent": "00-%s-%s-01" % (trace_id, span_id)}
@@ -728,11 +751,16 @@ class TraeProvider:
         if credentials.get("deviceId"):
             headers["X-Device-Id"] = credentials["deviceId"]
         headers.update({"X-Cloudide-Token": credentials["token"], "X-Ide-Token": credentials["token"],
-            "X-Ide-Version": version, "X-Ide-Version-Type": "stable", "X-Device-Type": "windows",
+            "X-Ide-Version": ide_version, "X-Ide-Version-Type": "stable", "X-Device-Type": "windows",
             "Request-Traffic-Type": "prod", "X-App-Version": "default",
             # Installed official product.json bootConfig.agent.appId / traeVersionCode.
             "X-App-Id": "6eefa01c-1036-4c7e-9ca5-d891f63bfcd8",
-            "X-Ide-Version-Code": "20250325", "X-App-Version-Code": "20250325"})
+            "X-Ide-Version-Code": ide_version_code, "X-App-Version-Code": ide_version_code,
+            "X-Device-Brand": os.environ.get("TRAE_DEVICE_MODEL") or "82RF",
+            "X-Device-Cpu": os.environ.get("TRAE_CPU") or "Intel",
+            "X-OS-Version": os.environ.get("TRAE_OS_VERSION") or "Windows 10"})
+        if raw_chat_function in REMOTE_MODEL_FUNCTIONS:
+            headers = remote_catalog_headers(headers)
         if credentials.get("uid"):
             headers["X-Uid"] = credentials["uid"]
         if credentials.get("machineId"):
@@ -750,9 +778,14 @@ class TraeProvider:
         if isinstance(body, dict):
             # New raw-chat wire names this field explicitly; retain the
             # verified legacy adapter's `function` header binding as well.
-            raw_chat_function = body.get("raw_chat_function") or body.get("function")
+            raw_chat_function = body.get("raw_chat_function")
+            if not raw_chat_function and url.endswith("/llm_utils_chat"):
+                raw_chat_function = body.get("function")
+        headers = self._headers(credentials, stream, raw_chat_function)
+        if url.endswith("/api/ide/v1/get_detail_param"):
+            headers = remote_catalog_headers(headers)
         request = urllib.request.Request(url, data=None if method == "GET" else _compact(body),
-                                         headers=self._headers(credentials, stream, raw_chat_function), method=method)
+                                         headers=headers, method=method)
         try:
             response = self._opener.open(request, timeout=45)
             status = response.getcode()
@@ -853,6 +886,35 @@ class TraeProvider:
         if quota_error and model_error:
             raise quota_error
 
+    def _refresh_remote_catalog(self, row, credentials):
+        """Read the live multi-function catalog used by modern TRAE clients.
+
+        The old ``model_list?type=chat`` response is a compatibility fallback
+        and is the reason older installations only showed a handful of models.
+        Each function is independent: one unavailable function must not hide
+        models returned by the other two.
+        """
+        payloads = []
+        errors = []
+        for function in REMOTE_MODEL_FUNCTIONS:
+            body = remote_catalog_request_body(function)
+            try:
+                payloads.append(self._json(
+                    _AGENT + "/api/ide/v1/get_detail_param", credentials,
+                    body, method="POST"))
+            except TraeError as error:
+                errors.append("%s: %s" % (function, error.code))
+        models = normalise_remote_catalog(payloads)
+        gateway_models = remote_gateway_models(models)
+        if not gateway_models:
+            detail = " | ".join(errors) or "没有可用的 function"
+            raise TraeError(502, "TRAE 动态模型目录不可用：" + detail,
+                            "remote_catalog_unavailable")
+        row["models"] = gateway_models
+        row["catalogSource"] = "remote_http"
+        row["catalogFetchedAt"] = time.time()
+        return None
+
     def _refresh_catalog(self, row, credentials):
         native_error = None
         row["nativeConnected"] = False
@@ -875,11 +937,29 @@ class TraeProvider:
             row["models"] = [{"upstreamId": m["upstreamId"], "name": m["name"],
                               "route": "native_client", "source": "local_client_cache"} for m in cached["models"]]
             row["catalogSource"], row["catalogFetchedAt"] = "local_client_cache", cached.get("fetchedAt")
+            if self._remote_catalog:
+                try:
+                    return self._refresh_remote_catalog(row, credentials)
+                except TraeError:
+                    pass
             return native_error or TraeError(503, "当前显示本机缓存目录；使用新模型需从新版桌面程序启动，并运行登录同一账号的 TRAE。", "native_bridge_unavailable")
         if row.get("catalogSource") in ("native_client", "local_client_cache") and row.get("models"):
-            # Never overwrite a discovered new catalog with the old five-item
-            # endpoint merely because the native client is temporarily closed.
+            # Prefer the modern upstream catalog before retaining a stale native
+            # snapshot.  If it is unavailable, never silently fall back to the
+            # old five-item endpoint.
+            if self._remote_catalog:
+                try:
+                    return self._refresh_remote_catalog(row, credentials)
+                except TraeError:
+                    pass
             return native_error or TraeError(503, "保留上次原生模型目录；请运行 TRAE 后刷新，未降级到旧接口。", "native_bridge_unavailable")
+        if self._remote_catalog:
+            try:
+                return self._refresh_remote_catalog(row, credentials)
+            except TraeError:
+                # A temporarily unavailable modern endpoint should not make an
+                # older account impossible to use; retain the legacy fallback.
+                pass
         value = self._json(_AGENT + "/api/ide/v1/model_list?type=chat", credentials, None, method="GET")
         configs = value.get("model_configs")
         if not isinstance(configs, list):
@@ -971,12 +1051,18 @@ class TraeProvider:
             raise TraeError(401, "TRAE 登录已失效，请在 TRAE 内刷新后重新同步。", "login_expired")
 
     @staticmethod
-    def _payload(payload):
+    def _model_name(payload):
         if not isinstance(payload, dict):
             raise TraeError(400, "请求必须为 JSON 对象。", "invalid_request")
         model = payload.get("model", "")
         if not isinstance(model, str) or not model.startswith("trae/") or not _MODEL.fullmatch(model[5:]):
             raise TraeError(400, "请选择 trae/ 前缀的模型。", "invalid_model")
+        return model
+
+    def _payload(self, payload, *, force_framed=None):
+        if not isinstance(payload, dict):
+            raise TraeError(400, "请求必须为 JSON 对象。", "invalid_request")
+        model = self._model_name(payload)
         for key in ("functions", "function_call", "response_format", "modalities", "audio"):
             if key in payload:
                 raise TraeError(422, "TRAE 不支持旧版 functions、结构化响应模式或多模态参数。", "unsupported_feature")
@@ -990,7 +1076,7 @@ class TraeProvider:
         if payload.get("n", 1) != 1:
             raise TraeError(422, "TRAE 首版仅支持 n=1。", "unsupported_feature")
         try:
-            tool_plan = prepare_tools(payload)
+            tool_plan = prepare_tools(payload, force_framed=force_framed)
         except ToolBridgeError as error:
             raise TraeError(error.status, error.message, error.code) from None
         messages = payload.get("messages")
@@ -1056,8 +1142,17 @@ class TraeProvider:
             return row
 
     def stream(self, payload):
+        # Validate the full request before account selection, preserving the
+        # historical error precedence for malformed payloads.  After the
+        # selected account is known, rebuild only remote DeepSeek text requests
+        # without the native framed envelope: the upstream HTTP endpoint wants
+        # ordinary chat messages while native DeepSeek still uses V2 framing.
         model, body = self._payload(payload)
         row = self._choose(model)
+        config = next((item for item in row.get("models", [])
+                       if item.get("upstreamId") == model[5:]), {})
+        if config.get("route") == "remote_http":
+            model, body = self._payload(payload, force_framed=False)
         return self._tracked_stream(row, model, body)
 
     def _tracked_stream(self, row, model, body):
@@ -1101,6 +1196,12 @@ class TraeProvider:
             if config.get("route") == "native_client":
                 yield from self._native_stream(row, model, body)
                 return
+            if config.get("route") == "remote_http" and config.get("upstreamModel"):
+                # Modern get_detail_param entries keep the public model id, but
+                # the direct llm_utils_chat endpoint still wants its stable
+                # provider config for a small set of aliases.
+                body = dict(body)
+                body["model"] = config["upstreamModel"]
             if body.get("_images"):
                 raise TraeError(422, "图片输入需要 TRAE 原生客户端路由。", "image_not_supported")
             if body.get("_tool_plan"):
@@ -1144,7 +1245,10 @@ class TraeProvider:
                             if value.get("tool_calls"):
                                 raise TraeError(502, "TRAE 返回了首版尚不支持的工具调用。", "unsupported_upstream_feature")
                             delta = {}
-                            for source, dest in (("response", "content"), ("reasoning_content", "reasoning_content")):
+                            for source, dest in (("response", "content"), ("content", "content"),
+                                                 ("text", "content"),
+                                                 ("reasoning_content", "reasoning_content"),
+                                                 ("reasoning", "reasoning_content")):
                                 part = value.get(source)
                                 if part is not None and not isinstance(part, str):
                                     raise TraeError(502, "TRAE 输出内容结构无效。", "invalid_upstream_response")
@@ -1159,10 +1263,23 @@ class TraeProvider:
                                     sent_role = True
                                 yield chunk(delta)
                         elif event == "token_usage":
-                            usage = {key: value[key] for key in ("prompt_tokens", "completion_tokens", "total_tokens")
-                                     if isinstance(value.get(key), int) and not isinstance(value[key], bool) and value[key] >= 0}
+                            usage_value = value.get("data") if isinstance(value.get("data"), dict) else value
+                            usage = {}
+                            for target, names in (("prompt_tokens", ("prompt_tokens", "input_tokens", "promptTokens", "inputTokens")),
+                                                  ("completion_tokens", ("completion_tokens", "output_tokens", "completionTokens", "outputTokens")),
+                                                  ("total_tokens", ("total_tokens", "totalTokens"))):
+                                for name in names:
+                                    candidate = usage_value.get(name)
+                                    if isinstance(candidate, int) and not isinstance(candidate, bool) and candidate >= 0:
+                                        usage[target] = candidate
+                                        break
+                            if "total_tokens" not in usage:
+                                total = usage.get("prompt_tokens", 0) + usage.get("completion_tokens", 0)
+                                if total:
+                                    usage["total_tokens"] = total
                         elif event == "done":
-                            reason = value.get("finish_reason", "stop")
+                            done_value = value.get("data") if isinstance(value.get("data"), dict) else value
+                            reason = done_value.get("finish_reason", done_value.get("stop_reason", "stop"))
                             if reason not in ("stop", "length", "content_filter"):
                                 raise TraeError(502, "TRAE 对话结束状态不受支持。", "invalid_upstream_response")
                             if not sent_role:
@@ -1175,6 +1292,12 @@ class TraeProvider:
                                 self._save(row)
                             yield chunk({}, reason, usage)
                             return
+                        elif event in ("metadata", "timing_cost", "extra_info"):
+                            # The modern TRAE stream includes bookkeeping
+                            # frames around the actual output.  They are not
+                            # assistant deltas and must not turn a valid
+                            # response into invalid_upstream_response.
+                            continue
                     raise TraeError(502, "TRAE 对话流意外中断，未重放请求。", "incomplete_stream")
             except (OSError, urllib.error.URLError, http.client.HTTPException, socket.timeout, TimeoutError):
                 error = TraeError(502, "TRAE 对话连接中断，未重放请求。", "network_error")

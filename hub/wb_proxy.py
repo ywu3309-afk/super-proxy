@@ -78,6 +78,8 @@ import wb_probes
 import wb_updates
 import wb_update_request
 import wb_trae_http
+import wb_external
+import wb_external_http
 import wb_upstream_errors
 IS_WINDOWS = os.name == "nt"
 
@@ -5869,6 +5871,11 @@ CREDITS_REFRESHER = None
 # Release discovery only - the checker never downloads or installs anything.
 UPDATES = None
 ACCOUNTS_DIR = os.environ.get("ACCOUNTS_DIR") or os.path.join(os.path.dirname(os.path.abspath(__file__)), 'accounts')
+
+
+def external_store():
+    """Third-party channels live beside the account store, never in AccountPool."""
+    return wb_external.ExternalStore(ACCOUNTS_DIR)
 def realm_state_file():
     """Path of the persisted realm switch.
 
@@ -17455,6 +17462,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(401, "panel password required", "invalid_request_error")
         if path == "/providers/trae" or path.startswith("/providers/trae/"):
             return wb_trae_http.management(self, path, wb_trae_http.provider_for(ACCOUNTS_DIR))
+        if path == "/providers/external" or path.startswith("/providers/external/"):
+            return wb_external_http.management(self, path, external_store())
         if path in ("/", "/dashboard", "/ui"):
             return self._get_dashboard()
         if path == "/panel/status":
@@ -20336,6 +20345,8 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?")[0]
         if path == "/providers/trae" or path.startswith("/providers/trae/"):
             return wb_trae_http.management(self, path, wb_trae_http.provider_for(ACCOUNTS_DIR), write=True)
+        if path == "/providers/external" or path.startswith("/providers/external/"):
+            return wb_external_http.management(self, path, external_store(), write=True)
         if path == "/console/toggle":
             # Panel-only management write: 收起/唤出本进程自己的控制台窗口，
             # 与设置、定价那几个写入同一个门。按钮带 `{}` body，

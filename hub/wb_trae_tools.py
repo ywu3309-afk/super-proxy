@@ -537,11 +537,14 @@ class ToolPlan:
         return result
 
 
-def prepare(payload):
+def prepare(payload, *, force_framed=None):
     """Return a bridge plan, or None for an ordinary text-only request."""
     if not isinstance(payload, dict):
         _error("请求必须为 JSON 对象。", "invalid_request", 400)
-    framed = isinstance(payload.get("model"), str) and payload["model"] in _FRAMED_MODELS
+    if force_framed is None:
+        framed = isinstance(payload.get("model"), str) and payload["model"] in _FRAMED_MODELS
+    else:
+        framed = bool(force_framed)
     if any(k in payload for k in ("functions", "function_call")):
         _error("工具桥仅支持 tools 协议，不支持旧 functions 协议。", "unsupported_feature")
     tools = payload.get("tools", [])
