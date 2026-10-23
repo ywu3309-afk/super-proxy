@@ -524,6 +524,34 @@ html[data-theme-style="cyber"] .settings-advanced-toggle{
   background:var(--panel2);box-shadow:var(--shadow-md)}
 .hdr-icon-btn svg{width:16px;height:16px;display:block}
 .hdr-icon-btn:disabled{opacity:.45;cursor:default}
+.desktop-update-btn{display:inline-flex;align-items:center;justify-content:center;gap:7px;
+  min-height:34px;padding:7px 15px;border:1px solid rgba(56,189,248,.72);
+  border-radius:9px;background:linear-gradient(135deg,#0ea5e9 0%,#6366f1 100%);
+  color:#fff;font-size:12px;font-weight:800;letter-spacing:.02em;white-space:nowrap;
+  box-shadow:0 0 0 1px rgba(56,189,248,.18),0 0 18px rgba(56,189,248,.22),var(--shadow-sm);
+  cursor:pointer;transition:transform .15s ease,filter .15s ease,box-shadow .15s ease}
+.desktop-update-btn::before{content:'↻';font-size:16px;line-height:1;font-weight:700}
+.desktop-update-btn:hover{filter:brightness(1.12);transform:translateY(-1px);
+  box-shadow:0 0 0 1px rgba(56,189,248,.34),0 0 26px rgba(56,189,248,.34),var(--shadow-md)}
+.desktop-update-btn:focus-visible{outline:2px solid var(--accent2);outline-offset:2px}
+.desktop-update-btn:disabled{opacity:.72;cursor:wait;transform:none;filter:none}
+.desktop-update-btn.is-busy::before{content:'…';animation:desktopUpdatePulse 1s steps(3,end) infinite}
+.desktop-update-btn.is-failed{background:linear-gradient(135deg,#dc2626 0%,#b91c1c 100%);border-color:#f87171}
+@keyframes desktopUpdatePulse{0%,100%{opacity:.35}50%{opacity:1}}
+@media (max-width:860px){.desktop-update-btn{order:2}.header-left .desktop-update-btn{margin-left:auto}}
+@media (max-width:640px){.desktop-update-btn{width:100%;min-height:38px;order:4}.header-left .desktop-update-btn{margin-left:0}.desktop-update-btn::before{font-size:17px}}
+.desktop-update-card{border:1px solid rgba(56,189,248,.48)!important;
+  background:linear-gradient(110deg,rgba(14,165,233,.12),rgba(99,102,241,.08))!important;
+  box-shadow:0 0 0 1px rgba(56,189,248,.08),0 0 28px rgba(56,189,248,.10),var(--shadow)!important}
+.desktop-update-card h2{color:var(--fg);font-size:15px;text-transform:none;letter-spacing:.02em}
+.desktop-update-actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.desktop-update-actions button{min-height:38px;padding:9px 18px;font-weight:800}
+.desktop-update-actions button:first-child{background:var(--accent-grad);border-color:transparent;color:#fff;box-shadow:0 0 18px var(--accent-soft)}
+.desktop-update-actions button:first-child:hover{filter:brightness(1.08)}
+.desktop-update-state{display:inline-flex;align-items:center;gap:6px;margin-left:6px;padding:3px 9px;
+  border-radius:999px;background:var(--accent-soft);border:1px solid var(--line);font-size:11px;color:var(--dim)}
+.desktop-update-state[data-state="available"],.desktop-update-state[data-state="downloading"],.desktop-update-state[data-state="verifying"]{color:var(--accent);border-color:var(--accent)}
+.desktop-update-state[data-state="failed"]{color:var(--bad);border-color:var(--bad);background:var(--bad-soft)}
 .hdr-icon-danger:hover{color:var(--bad);border-color:var(--bad)}
 @media (max-width:640px){.hdr-icon-btn{width:36px;height:36px}}
 
@@ -3260,6 +3288,12 @@ html[data-theme-style="cyber"] .dot{animation:cyberPulse 2.4s ease-in-out infini
         运行日志
       </button>
     </nav>
+    <button type="button" class="desktop-update-btn" id="desktopUpdateButton"
+            data-no-i18n onclick="triggerDesktopUpdate(this)"
+            title="检查并安装最新桌面版本（Ctrl+U）"
+            aria-label="检查并安装最新桌面版本">
+      检查桌面更新
+    </button>
     <!-- 顶栏按钮：眼睛 = 在新窗口打开运行日志；电源 = 关闭网关服务。
          data-no-i18n：图标按钮，title 固定中文。 -->
     <button type="button" class="hdr-icon-btn" id="btnConsoleToggle" data-no-i18n onclick="toggleConsoleWindow()"
@@ -4739,19 +4773,17 @@ html[data-theme-style="cyber"] .dot{animation:cyberPulse 2.4s ease-in-out infini
         </div>
       </section>
 
-      <!-- 更新功能已禁用：融合后的自有软件不对外部原作者仓库做自动/手动更新，
-           避免覆盖本地融合改动。如需恢复，删掉下面这个 display:none 即可。 -->
-      <section style="display:none">
+      <section class="desktop-update-card">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
           <div>
-            <h2 style="margin:0">更新 <em id="setUpdateState"></em></h2>
+            <h2 style="margin:0">桌面软件更新 <em id="setUpdateState" class="desktop-update-state">尚未检查</em></h2>
             <div style="font-size:12px;color:var(--dim);margin-top:4px">
-              网关检查自有 GitHub Release。发现稳定版后可手动安装；安装会短暂重启网关，账号与用量数据会保留。
+              这里直接检查公开 GitHub Release。发现新版本后点击安装，软件会自动下载、校验并重启；账号、密钥、设置和用量数据都会保留。
             </div>
           </div>
-          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+          <div class="desktop-update-actions">
             <button id="setUpdateCheckBtn" onclick="checkUpdateNow(this)">立即检查更新</button>
-            <button id="setUpdateInstallBtn" class="sec" onclick="installUpdateNow(this)" disabled>安装更新</button>
+            <button id="setUpdateInstallBtn" class="sec" onclick="installUpdateNow(this)" disabled>安装最新版本</button>
           </div>
         </div>
         <table>
@@ -11495,6 +11527,56 @@ function updateStateLabel(data){
   return '尚未检查';
 }
 
+let DESKTOP_UPDATE_BUSY = false;
+function desktopUpdateButtonState(state, text){
+  const button = document.getElementById('desktopUpdateButton');
+  if(!button) return;
+  if(text) button.textContent = text;
+  button.classList.toggle('is-busy', state === 'checking' || state === 'downloading' || state === 'verifying' || state === 'restarting');
+  button.classList.toggle('is-failed', state === 'failed');
+  button.disabled = DESKTOP_UPDATE_BUSY;
+  button.title = state === 'failed' ? '上次更新失败，点击重试' : '检查并安装最新桌面版本（Ctrl+U）';
+}
+
+async function triggerDesktopUpdate(button){
+  if(DESKTOP_UPDATE_BUSY) return;
+  const desktop = window.superProxyDesktop;
+  if(!desktop || typeof desktop.checkForUpdate !== 'function'){
+    toast('请从桌面软件窗口使用“检查桌面更新”', 'warn');
+    return;
+  }
+  DESKTOP_UPDATE_BUSY = true;
+  desktopUpdateButtonState('checking', '正在检查更新…');
+  try{
+    const result = await desktop.checkForUpdate();
+    const state = String((result || {}).state || '');
+    if(state === 'failed'){
+      toast('更新失败：' + String(result.error || '请重试'), 'bad');
+      desktopUpdateButtonState('failed', '重试桌面更新');
+    }else if(state === 'latest'){
+      toast('当前已经是最新版本', 'ok');
+      desktopUpdateButtonState('latest', '检查桌面更新');
+    }else if(state === 'available'){
+      toast('发现新版本 v' + String(result.targetVersion || ''), 'ok');
+      desktopUpdateButtonState('available', '安装最新版本');
+    }else{
+      desktopUpdateButtonState(state, '检查桌面更新');
+    }
+  }catch(e){
+    toast('更新失败：' + e.message, 'bad');
+    desktopUpdateButtonState('failed', '重试桌面更新');
+  }finally{
+    DESKTOP_UPDATE_BUSY = false;
+    const current = document.getElementById('desktopUpdateButton');
+    if(current){
+      current.disabled = false;
+      if(current.classList.contains('is-failed')) current.textContent = '重试桌面更新';
+      else current.textContent = '检查桌面更新';
+      current.classList.remove('is-busy');
+    }
+  }
+}
+
 function applyUpdateStatus(data){
   data = data || {};
   const failure = updateCheckFailure(data);
@@ -11505,6 +11587,7 @@ function applyUpdateStatus(data){
   const state = document.getElementById('setUpdateState');
   if(state){
     state.textContent = '(' + updateStateLabel(data) + ')';
+    state.dataset.state = failure ? 'failed' : (data.update_available ? 'available' : 'latest');
     state.style.color = failure ? 'var(--warn)'
       : data.update_available ? 'var(--accent2)' : 'var(--dim)';
   }

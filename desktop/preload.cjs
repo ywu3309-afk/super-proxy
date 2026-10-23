@@ -6,5 +6,7 @@ contextBridge.exposeInMainWorld('superProxyDesktop', Object.freeze({
   setAutostart: enabled => {
     if (typeof enabled !== 'boolean') return Promise.reject(new TypeError('开机自启动参数必须为布尔值'));
     return ipcRenderer.invoke('super-proxy:autostart:set', enabled);
-  }
+  },
+  checkForUpdate: () => ipcRenderer.invoke('super-proxy:update:check'),
+  getUpdateStatus: () => ipcRenderer.invoke('super-proxy:update:status')
 }));

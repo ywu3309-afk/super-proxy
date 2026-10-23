@@ -39,16 +39,35 @@ function validateManifest(manifest, release, repository) {
 
 function createUpdater({ app, dialog, repository, runtimeRoot, getGateway, beforeQuit, log = () => {} }) {
   let busy = false;
+  const status = {
+    state: 'idle',
+    currentVersion: '',
+    targetVersion: '',
+    progress: 0,
+    message: '',
+    error: '',
+    updatedAt: 0
+  };
+  function setStatus(patch) {
+    Object.assign(status, patch, { updatedAt: Date.now() });
+  }
+  function getStatus() {
+    return { ...status, busy };
+  }
   async function check(window) {
-    if (busy) return;
+    if (busy) return { ...status, busy: true };
     busy = true;
+    setStatus({ state: 'checking', currentVersion: app.getVersion(), targetVersion: '', progress: 0,
+      message: '正在连接 GitHub Release…', error: '' });
     try {
       const token = github.loadToken(repository);
       const release = selectRelease(await github.apiJSON(repository, '/releases?per_page=30', token));
       if (!release || compareVersions(release.tag_name.slice(1), app.getVersion()) <= 0) {
+        setStatus({ state: 'latest', currentVersion: app.getVersion(), targetVersion: '', progress: 100,
+          message: release ? '已经是最新稳定版本。' : '仓库还没有发布可安装的稳定版本。' });
         await dialog.showMessageBox(window, { type: 'info', title: '超级反代 · 桌面更新',
           message: `当前版本 v${app.getVersion()}`, detail: release ? '已经是最新稳定版本。' : '仓库还没有发布可安装的稳定版本。' });
-        return;
+        return getStatus();
       }
       if (!app.isPackaged || process.platform !== 'win32' || process.arch !== 'x64') {
         throw new Error('此更新包仅用于 Windows x64 便携桌面版；源码模式请通过 Git 更新。');
@@ -63,18 +82,28 @@ function createUpdater({ app, dialog, repository, runtimeRoot, getGateway, befor
       if (!descriptor) throw new Error('此版本缺少桌面更新清单，未进行安装');
       const manifest = await github.readManifest(repository, descriptor, token);
       const asset = validateManifest(manifest, release, repository);
+      setStatus({ state: 'available', currentVersion: app.getVersion(), targetVersion: manifest.version, progress: 100,
+        message: `发现 v${manifest.version}，等待安装。`, error: '' });
       const choice = await dialog.showMessageBox(window, { type: 'question', title: '发现桌面更新',
         message: `v${app.getVersion()} → v${manifest.version}`,
         detail: '从 GitHub Release 下载并校验 SHA-256，然后重启软件。账号、密钥、设置和用量数据保留；上一版程序保留用于回滚。',
         buttons: ['下载并重启更新', '稍后'], defaultId: 1, cancelId: 1, noLink: true });
       if (choice.response !== 0) return;
+      setStatus({ state: 'downloading', targetVersion: manifest.version, progress: 0,
+        message: `正在下载 v${manifest.version}…` });
       const updateRoot = path.join(path.dirname(runtimeRoot), '.super-proxy-updates');
       fs.mkdirSync(updateRoot, { recursive: true });
       if (fs.lstatSync(updateRoot).isSymbolicLink()) throw new Error('更新暂存目录不能是符号链接');
       const jobDir = fs.mkdtempSync(path.join(updateRoot, `v${manifest.version}-`));
       const zipPath = path.join(jobDir, manifest.asset);
       log(`[desktop-update] downloading v${manifest.version}`);
-      await github.downloadAsset(repository, asset, token, zipPath, manifest);
+      await github.downloadAsset(repository, asset, token, zipPath, manifest, ({ received, total }) => {
+        const progress = total ? Math.min(99, Math.round(received / total * 100)) : 0;
+        setStatus({ state: 'downloading', targetVersion: manifest.version, progress,
+          message: `正在下载更新包… ${progress}%` });
+      });
+      setStatus({ state: 'verifying', targetVersion: manifest.version, progress: 99,
+        message: '正在校验更新包…' });
       const sourcePython = path.join(process.resourcesPath, 'python');
       if (!fs.existsSync(path.join(sourcePython, 'python.exe'))) throw new Error('更新需要便携包内置的 Python 运行时');
       const helperPython = path.join(jobDir, 'python');
@@ -92,6 +121,8 @@ function createUpdater({ app, dialog, repository, runtimeRoot, getGateway, befor
         cwd: jobDir, timeout: 90000, windowsHide: true, maxBuffer: 4096,
         env: { ...process.env, GH_TOKEN: '', GITHUB_TOKEN: '' }
       }, (error) => error ? reject(new Error('更新包安装预检未通过，当前软件保持运行；请检查暂存目录和磁盘空间。')) : resolve()));
+      setStatus({ state: 'restarting', targetVersion: manifest.version, progress: 100,
+        message: '校验通过，正在重启安装…' });
       const child = spawn(path.join(helperPython, 'python.exe'), [helperPath, jobPath], {
         cwd: jobDir, detached: true, stdio: 'ignore', windowsHide: true,
         env: { ...process.env, GH_TOKEN: '', GITHUB_TOKEN: '' }
@@ -100,14 +131,24 @@ function createUpdater({ app, dialog, repository, runtimeRoot, getGateway, befor
       child.unref();
       beforeQuit();
       app.quit();
+      return getStatus();
     } catch (error) {
       // 仅输出自有安全错误，绝不输出请求头、凭据或带签名的附件 URL。
-      log('[desktop-update] update did not complete');
+      const detail = String(error?.message || '请检查网络和仓库权限后重试。').replace(/[\r\n]+/g, ' ').slice(0, 240);
+      log(`[desktop-update] update did not complete: ${detail}`);
+      setStatus({ state: 'failed', progress: 0, error: detail,
+        message: '更新未完成' });
       await dialog.showMessageBox(window, { type: 'error', title: '桌面更新未完成',
-        message: '没有替换当前程序', detail: error?.message || '请检查网络和仓库权限后重试。' });
+        message: '没有替换当前程序', detail });
+      return getStatus();
     } finally { busy = false; }
   }
-  return { check };
+  function stop() {
+    // A running download is cancelled by the process exit itself; this hook is
+    // kept for callers that want a symmetric updater lifecycle.
+    busy = false;
+  }
+  return { check, getStatus, stop };
 }
 
 module.exports = { ARCHIVE_ROOT, EXE, compareVersions, selectRelease, validateManifest, createUpdater };

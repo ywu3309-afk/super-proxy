@@ -6,6 +6,10 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+// Keep the deterministic stream-fixture tests single-pass; production builds
+// use the default three connection attempts.
+process.env.SUPER_PROXY_UPDATE_ATTEMPTS = '1';
+
 const require = createRequire(import.meta.url);
 const { compareVersions, selectRelease, validateManifest } = require('../desktop/updater.cjs');
 const { apiJSON, downloadAsset, readManifest } = require('../desktop/github.cjs');
@@ -84,6 +88,29 @@ test('a redirect outside GitHub is refused before contacting the new host', asyn
   try {
     await assert.rejects(downloadAsset(repository, { id: 1 }, 'fixture-only', join(temp, 'bad-host.zip'), manifest));
     assert.equal(calls, 1);
+  } finally { globalThis.fetch = original; }
+});
+
+test('a public release download falls back to the browser asset URL after an API failure', async () => {
+  const original = globalThis.fetch;
+  const bytes = Buffer.from('direct-release-asset');
+  const calls = [];
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url: String(url), hasAuth: !!options.headers.Authorization });
+    if (calls.length === 1) return new Response(null, { status: 503 });
+    return new Response(bytes, { status: 200 });
+  };
+  const target = join(temp, 'direct-fallback.zip');
+  try {
+    await downloadAsset(repository, {
+      id: 7,
+      browser_download_url: `https://github.com/${repository}/releases/download/v1.2.0/direct-fallback.zip`
+    }, '', target, { size: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') });
+    assert.deepEqual(readFileSync(target), bytes);
+    assert.equal(calls.length, 2);
+    assert.equal(calls[0].hasAuth, false);
+    assert.equal(calls[1].hasAuth, false);
+    assert.match(calls[1].url, /github\.com\/ywu3309-afk\/super-proxy\/releases\/download/);
   } finally { globalThis.fetch = original; }
 });
 

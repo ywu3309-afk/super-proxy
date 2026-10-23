@@ -318,7 +318,7 @@ function createTray(port) {
       { label: '打开控制面板', click: () => showWindow() },
       { label: '用浏览器打开', click: () => shell.openExternal(`http://127.0.0.1:${port}/`) },
       { label: '打开数据目录', click: () => shell.openPath(dataDir) },
-      { label: '检查桌面更新…', click: () => desktopUpdater.check(mainWindow) },
+      { label: '立即检查桌面更新…', accelerator: 'CmdOrCtrl+U', click: () => desktopUpdater.check(mainWindow) },
       { type: 'separator' },
       { label: '退出', click: () => { quitting = true; app.quit(); } }
     ]));
@@ -408,6 +408,8 @@ if (!gotLock) {
         getOrigin: () => gateway ? `http://127.0.0.1:${gateway.port}` : null,
         onChange: refreshAutostartMenu
       });
+      ipcMain.handle('super-proxy:update:check', () => desktopUpdater.check(mainWindow));
+      ipcMain.handle('super-proxy:update:status', () => desktopUpdater.getStatus());
       const startup = autostartStatus();
       Menu.setApplicationMenu(Menu.buildFromTemplate([
         { label: '软件', submenu: [
@@ -420,7 +422,7 @@ if (!gotLock) {
               finally { refreshAutostartMenu(); }
             }
           },
-          { label: '检查桌面更新…', click: () => desktopUpdater.check(mainWindow) },
+          { label: '立即检查桌面更新…', accelerator: 'CmdOrCtrl+U', click: () => desktopUpdater.check(mainWindow) },
           { type: 'separator' },
           { label: '退出', click: () => { quitting = true; app.quit(); } }
         ] },
