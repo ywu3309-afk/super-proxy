@@ -235,12 +235,16 @@ class NativeClientTests(unittest.TestCase):
                 self.assert_code("upstream_model_unconfirmed", lambda: self.client.chat(UID, MID, messages(), max_chars=256))
         self.assertEqual(len(self.http.requests), 9)
 
-    def test_chat_enforces_combined_response_reasoning_limit_without_partial_success(self):
+    def test_chat_enforces_separate_response_and_reasoning_limits_without_partial_success(self):
+        # Response and reasoning each get the full character budget; neither
+        # consumes the other's allowance.
         self.http.add(chat_value(response="ab", reasoning_content="cd"))
-        self.assert_code("output_limit", lambda: self.client.chat(UID, MID, messages(), max_chars=3))
+        self.assert_code("output_limit", lambda: self.client.chat(UID, MID, messages(), max_chars=1))
+        self.http.add(chat_value(response="ab", reasoning_content="c" * 8))
+        self.assert_code("output_limit", lambda: self.client.chat(UID, MID, messages(), max_chars=4))
         self.http.add(chat_value(response="ab", reasoning_content="cd"))
         self.assertEqual(self.client.chat(UID, MID, messages(), max_chars=4)["response"], "ab")
-        self.assertEqual(len(self.http.requests), 2)
+        self.assertEqual(len(self.http.requests), 3)
 
     def test_chat_estimates_when_usage_is_missing_or_invalid(self):
         for usage in ({"prompt_tokens": True, "completion_tokens": -1, "total_tokens": "4"},
@@ -276,11 +280,31 @@ class NativeClientTests(unittest.TestCase):
         self.assertEqual(decoded[1], {"role": "system", "content": "keep system"})
         self.assertLess(len(decoded), len(history))
 
-    def test_chat_does_not_truncate_an_oversized_system_or_latest_message(self):
+    def test_chat_middle_truncates_an_oversized_system_with_omission_marker(self):
+        # A system prompt that fits the budget alone may be compacted (head +
+        # omission marker + tail); the latest user turn stays untouched.
+        self.http.add(chat_value())
         history = [{"role": "system", "content": [{"type": "text", "text": "😀" * 30000}]},
+                   {"role": "user", "content": [{"type": "text", "text": "latest"}]}]
+        result = self.client.chat(UID, MID, history, max_chars=256)
+        payload = json.loads(self.http.requests[0][0].data)
+        prompt = payload["prompt"]
+        decoded = json.loads(prompt.split("\n", 1)[1])
+        self.assertLessEqual(native._utf16_length(prompt), native._NATIVE_PROMPT_BUDGET)
+        self.assertIn("系统提示中段已省略", decoded[0]["content"])
+        self.assertLess(len(decoded[0]["content"]), len(history[0]["content"][0]["text"]))
+        self.assertEqual(decoded[-1], {"role": "user", "content": "latest"})
+        self.assertEqual(result["context_trim"], 3)
+        self.assertEqual(len(self.http.requests), 1)
+
+    def test_chat_still_refuses_a_system_larger_than_the_whole_budget_with_diagnostics(self):
+        history = [{"role": "system", "content": [{"type": "text", "text": "x" * 210000}]},
                    {"role": "user", "content": [{"type": "text", "text": "latest"}]}]
         error = self.assert_code("request_too_large", lambda: self.client.chat(UID, MID, history, max_chars=256))
         self.assertIn("当前消息本身", error.message)
+        self.assertEqual(error.extra["budget_chars"], 60000)
+        self.assertGreaterEqual(error.extra["context_chars"], 210000)
+        self.assertIn("60000", error.extra["suggest"])
         self.assertEqual(self.http.requests, [])
 
 
@@ -489,7 +513,7 @@ class NativeProviderTests(unittest.TestCase):
         self.ready()
         history = [{"role": "system", "content": "rules"}, {"role": "user", "content": "first"},
                    {"role": "assistant", "content": "answer"}, {"role": "user", "content": "second"}]
-        for tokens, expected in ((1, 256), (32, 512), (65536, 65536)):
+        for tokens, expected in ((1, 8192), (32, 8192), (65536, 65536)):
             self.provider.chat({**self.payload, "messages": history, "max_tokens": tokens})
             call = self.native.chat_calls[-1]
             self.assertEqual(call["max_chars"], expected)

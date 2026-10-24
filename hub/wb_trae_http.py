@@ -39,11 +39,15 @@ def _json(handler, status, value):
     handler.wfile.flush()
 
 
-def _error(handler, status, message, code="trae_error"):
+def _error(handler, status, message, code="trae_error", extra=None):
     handler._handle_expect_continue()
     handler._discard_body()
-    return _json(handler, status, {"error": {"message": message,
-                                           "type": "provider_error", "code": code}})
+    payload = {"message": message, "type": "provider_error", "code": code}
+    if isinstance(extra, dict):
+        for key in ("context_chars", "budget_chars", "suggest"):
+            if key in extra:
+                payload[key] = extra[key]
+    return _json(handler, status, {"error": payload})
 
 
 def _callback_url(handler):
@@ -162,7 +166,7 @@ def management(handler, path, provider, write=False):
         # These errors belong to the upstream account, not the local panel
         # session. The existing UI treats HTTP 401/403 as panel logout.
         status = 409 if exc.status in (401, 403) else exc.status
-        return _error(handler, status, exc.message, exc.code)
+        return _error(handler, status, exc.message, exc.code, exc.extra)
     except (BrokenPipeError, ConnectionError):
         handler.close_connection = True
     except Exception:
@@ -183,7 +187,7 @@ def chat(handler, path, payload, provider):
         except StopIteration:
             return _error(handler, 502, "TRAE returned an empty stream", "empty_stream")
     except wb_trae.TraeError as exc:
-        return _error(handler, exc.status, exc.message, exc.code)
+        return _error(handler, exc.status, exc.message, exc.code, exc.extra)
     except Exception:
         return _error(handler, 502, "TRAE upstream request failed", "upstream_error")
 
@@ -207,7 +211,12 @@ def chat(handler, path, payload, provider):
         handler.wfile.flush()
     except wb_trae.TraeError as exc:
         try:
-            event({"error": {"message": exc.message, "type": "provider_error", "code": exc.code}})
+            payload = {"message": exc.message, "type": "provider_error", "code": exc.code}
+            if isinstance(exc.extra, dict):
+                for key in ("context_chars", "budget_chars", "suggest"):
+                    if key in exc.extra:
+                        payload[key] = exc.extra[key]
+            event({"error": payload})
         except (BrokenPipeError, ConnectionError):
             pass
     except (BrokenPipeError, ConnectionError):

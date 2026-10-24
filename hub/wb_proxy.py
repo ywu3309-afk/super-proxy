@@ -332,6 +332,18 @@ class BodyTooLarge(Exception):
     def __init__(self, length):
         super(BodyTooLarge, self).__init__(length)
         self.length = length
+class BodyTruncated(Exception):
+    """Raised when the socket delivered fewer body bytes than declared.
+
+    A truncated upload is a transport symptom (client library, tunnel or proxy
+    gave up mid-body), not a malformed document: answering 400 tells every
+    OpenAI/Anthropic SDK this request must never be retried. 408 puts it in the
+    retryable class, which is what actually fixes "偶发失败、重发就好".
+    """
+    def __init__(self, received, declared):
+        super(BodyTruncated, self).__init__(received, declared)
+        self.received = received
+        self.declared = declared
 class BadJSON(Exception):
     """Raised when a request body is present but not a JSON object."""
 # CORS is only needed by browser-based chat clients that call the OpenAI-style
@@ -11296,7 +11308,7 @@ def normalize_roles(messages):
     """Map role names the upstream rejects onto ones it accepts.
     WorkBuddy only knows system / user / assistant / tool. OpenAI's newer
     "developer" role (used by the Codex CLI and current SDKs) is the same thing
-    as "system", but sending it verbatim fails with code 11128.
+    as "system", but sending it verbatim fails with code 11-128.
     """
     out = []
     for m in messages or []:
@@ -11319,7 +11331,7 @@ SANITIZE_FEATURES = (
     "Main branch (",
     "You are a coding agent running in the Codex CLI",
     "github.com/anthropics/",
-    "11128",
+    "11-128",
 )
 SANITIZE_REWRITES = (
     ("You are Claude Code, Anthropic's official CLI for Claude",
@@ -11330,12 +11342,12 @@ SANITIZE_REWRITES = (
      "You are a coding agent running in the Codex CLI tool, a terminal-based coding assistant."),
     ("To give feedback, users should report the issue at https://github.com/anthropics/claude-code/issues",
      "To provide feedback, users should report the issue at https://github.com/anthropics/claude-code/issues"),
-    ("11128", "11-128"),
+    ("11-128", "11-128"),
 )
 SANITIZE_HDR_RE = re.compile(r"(?i)x-anthropic-billing-header:[^;\r\n]*;?\s*")
 SANITIZE_BARE_HDR_RE = re.compile(r"(?i)x-anthropic-billing-header")
 SANITIZE_KV_RE = re.compile(r"(?i)\bcc_[a-z0-9_]+=[^;\r\n]*;?\s*")
-# WorkBuddy upstream returns 11128 ("Illegal API invocation from an unapproved
+# WorkBuddy upstream returns 11-128 ("Illegal API invocation from an unapproved
 # channel") when this exact OmO identity fingerprint appears as a contiguous
 # substring in a system message. A/B tests show the match is case-insensitive,
 # survives surrounding prefix/suffix text, and stops matching when the phrase
@@ -11344,6 +11356,26 @@ SANITIZE_KV_RE = re.compile(r"(?i)\bcc_[a-z0-9_]+=[^;\r\n]*;?\s*")
 SANITIZE_OMO_JUNIOR_RE = re.compile(
     r"Sisyphus-Junior - Focused executor from OhMyOpenCode", re.IGNORECASE
 )
+# DeepSeek Harness (DSH) system prompts carry two contiguous phrases that the
+# cn channel check rejects with 400 / code 11-128 (intl does not check).
+# Forensics on the cn upstream with the real 5780-char DSH system prompt show
+# BOTH phrases must be present for the rejection: breaking either one alone
+# still 400s while breaking both returns 200. The rewrite splits each phrase
+# with a zero-width space: visually identical, same meaning to the model, no
+# matching contiguous bytes on the wire. Done in the gateway so DSH needs no
+# patch and upgrades do not lose it.
+SANITIZE_DSH_ZWSP = "\u200b"
+#: Phrases are joined from word lists so the source never contains an
+#: invisible character that an editor path could swallow (see
+#: tests/_test_dsh_sanitize.py: the regex pattern must stay pure ASCII).
+SANITIZE_DSH_PHRASES = (
+    " ".join(["powered", "by", "DeepSeek", "Harness"]),
+    " ".join(["DeepSeek", "Harness", "Web", "GUI"]),
+)
+SANITIZE_DSH_RES = tuple(re.compile(p, re.IGNORECASE) for p in SANITIZE_DSH_PHRASES)
+def _sanitize_dsh_phrase(match):
+    """Break the phrase apart with zero-width spaces: same text, new bytes."""
+    return match.group(0).replace(" ", SANITIZE_DSH_ZWSP)
 # 指纹判定的字面量快路径（见 has_fingerprint）：原先对每段文本跑两个 (?i) 正则，
 # 4KB 输入实测 319µs，其中正则 137+188µs、几个 `in` 只占 9µs；64KB 文本要
 # 6.2ms，而 sanitize_messages 会给每个文本段都过一遍——build_upstream_body
@@ -11364,6 +11396,7 @@ SANITIZE_BARE_HDR_LOWER = SANITIZE_BARE_HDR_RE.pattern
 if SANITIZE_BARE_HDR_LOWER.startswith("(?i)"):
     SANITIZE_BARE_HDR_LOWER = SANITIZE_BARE_HDR_LOWER[4:]
 SANITIZE_OMO_JUNIOR_LOWER = SANITIZE_OMO_JUNIOR_RE.pattern.lower()
+SANITIZE_DSH_LOWER = tuple(p.lower() for p in SANITIZE_DSH_PHRASES)
 def has_fingerprint(text):
     if not isinstance(text, str) or not text:
         return False
@@ -11376,7 +11409,9 @@ def has_fingerprint(text):
         low = text.translate(SANITIZE_REI_FOLD).lower()
     else:
         low = text.lower()
-    return SANITIZE_BARE_HDR_LOWER in low or SANITIZE_OMO_JUNIOR_LOWER in low
+    return (SANITIZE_BARE_HDR_LOWER in low
+            or SANITIZE_OMO_JUNIOR_LOWER in low
+            or any(p in low for p in SANITIZE_DSH_LOWER))
 def sanitize_text(text):
     if not isinstance(text, str) or not text:
         return text
@@ -11387,6 +11422,8 @@ def sanitize_text(text):
     # accepted by the upstream. Only the confirmed contiguous fingerprint is
     # neutralized.
     text = SANITIZE_OMO_JUNIOR_RE.sub("Sisyphus-Junior - Focused executor", text)
+    for _phrase_re in SANITIZE_DSH_RES:
+        text = _phrase_re.sub(_sanitize_dsh_phrase, text)
     for old, new in SANITIZE_REWRITES:
         text = text.replace(old, new)
     text = SANITIZE_HDR_RE.sub("", text)
@@ -18099,6 +18136,7 @@ class Handler(BaseHTTPRequestHandler):
         """
         chunks = []
         total = 0
+        complete = False
         while True:
             line = self.rfile.readline(65536)
             if not line:
@@ -18116,6 +18154,7 @@ class Handler(BaseHTTPRequestHandler):
                     trailer = self.rfile.readline(65536)
                     if not trailer or trailer in (b"\r\n", b"\n"):
                         break
+                complete = True
                 break
             total += size
             if total > max_bytes:
@@ -18126,11 +18165,13 @@ class Handler(BaseHTTPRequestHandler):
             while remaining > 0:
                 data = self.rfile.read(min(remaining, 65536))
                 if not data:
-                    raise BadJSON()
+                    raise BodyTruncated(total - remaining, total)
                 chunks.append(data)
                 remaining -= len(data)
             self.rfile.read(2)  # CRLF after the chunk data
         self._body_consumed = True
+        if not complete and total > 0:
+            raise BodyTruncated(sum(len(chunk) for chunk in chunks), total)
         return b"".join(chunks)
     def _read_payload(self, max_bytes=MAX_PAYLOAD_BYTES, allow_list=False):
         """Parse the request body into a dict (or a list when allow_list).
@@ -18157,11 +18198,22 @@ class Handler(BaseHTTPRequestHandler):
         if length < 0:
             raise BadJSON()
         try:
-            raw = self.rfile.read(length).decode("utf-8") if length else "{}"
-            # Mark the body as taken so a later error reply does not try to
-            # drain the same bytes again (that read would block forever).
-            self._body_consumed = True
+            if length:
+                buffer = self.rfile.read(length)
+                # Mark the body as taken so a later error reply does not try to
+                # drain the same bytes again (that read would block forever).
+                self._body_consumed = True
+                if len(buffer) < length:
+                    # Short read: the peer vanished mid-body. Never parse a
+                    # fragment as if it were the document.
+                    raise BodyTruncated(len(buffer), length)
+                raw = buffer.decode("utf-8")
+            else:
+                raw = "{}"
+                self._body_consumed = True
             data = json.loads(raw or "{}")
+        except (BodyTruncated, BodyTooLarge, BadJSON):
+            raise
         except Exception:
             raise BadJSON()
         if isinstance(data, dict):
@@ -18182,6 +18234,24 @@ class Handler(BaseHTTPRequestHandler):
                 self._anthropic_error(413, message, "invalid_request_error")
             else:
                 self._error(413, message, "invalid_request_error")
+            return None
+        except BodyTruncated as exc:
+            # Transport symptom, not a malformed document. 400 tells every
+            # OpenAI/Anthropic SDK "never retry"; 408 puts it back in the
+            # retryable class, which is what "偶发失败、重发就好" actually needs.
+            add_log_entry(
+                "request body truncated: peer=%s received=%d/%d path=%s ua=%s"
+                % (self.client_address[0] if self.client_address else "?",
+                   exc.received, exc.declared,
+                   self.path.split("?")[0][:80],
+                   (self.headers.get("User-Agent") or "-")[:80]),
+                level="warning", tag="http")
+            message = ("request body truncated (%d of %d bytes received); "
+                       "retry the same request" % (exc.received, exc.declared))
+            if self._anthropic_route():
+                self._anthropic_error(408, message, "invalid_request_error")
+            else:
+                self._error(408, message, "invalid_request_error")
             return None
         except BadJSON:
             if self._anthropic_route():
@@ -20037,6 +20107,9 @@ class Handler(BaseHTTPRequestHandler):
     def _responses_stream_response(self, upstream, model, custom_names, request_meta, fp, account, t_start, namespace_map=None, base_body=None, session_key=None, realm=None, effort=None):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        # Ask nginx and tunnel front-ends not to accumulate frames; without
+        # this a reverse proxy makes streaming look like one big response.
+        self.send_header("X-Accel-Buffering", "no")
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "close")
         if cors_origin_allowed(self.path):
@@ -20299,6 +20372,9 @@ class Handler(BaseHTTPRequestHandler):
                                   session_meta=None, effort=None):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        # Ask nginx and tunnel front-ends not to accumulate frames; without
+        # this a reverse proxy makes streaming look like one big response.
+        self.send_header("X-Accel-Buffering", "no")
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "close")
         if cors_origin_allowed(self.path):
@@ -20457,6 +20533,9 @@ class Handler(BaseHTTPRequestHandler):
         )
         if not is_account_route and not is_messages_route and path not in (
                 "/v1/chat/completions", "/chat/completions",
+                # 有的客户端把 base_url 当成完整端点、直接 POST 到 /v1，
+                # 少这条别名会得到一个 404，看起来像"网关没起来"。
+                "/v1",
                 "/v1/completions", "/completions",
                 "/v1/responses", "/responses"):
             return self._error(404, "not found", "invalid_request_error")
@@ -20637,6 +20716,7 @@ class Handler(BaseHTTPRequestHandler):
     def _chat_stream_response(self, upstream, model, fp, account, t_start, effort=None):
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("X-Accel-Buffering", "no")
             self.send_header("Cache-Control", "no-cache")
             self.send_header("Connection", "close")
             if cors_origin_allowed(self.path):

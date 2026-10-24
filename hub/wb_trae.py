@@ -24,7 +24,7 @@ import urllib.request
 import uuid
 
 from wb_trae_catalog import read_local_model_catalog
-from wb_trae_native import NativeTraeClient, NativeBridgeError
+from wb_trae_native import NativeTraeClient, NativeBridgeError, _NATIVE_PROMPT_BUDGET
 from wb_trae_tools import prepare as prepare_tools, ToolBridgeError
 import wb_trae_oauth as trae_oauth
 from wb_trae_remote import (
@@ -37,12 +37,13 @@ from wb_trae_remote import (
 
 
 class TraeError(Exception):
-    def __init__(self, status, message, code="trae_error"):
+    def __init__(self, status, message, code="trae_error", extra=None):
         super().__init__(message)
         self.status = int(status)
         self.http_status = self.status
         self.message = str(message)
         self.code = str(code)
+        self.extra = extra if isinstance(extra, dict) else None
 
 
 # Verified against installed TRAE CN 3.4.4 product.json bootConfig.agent/remote.
@@ -847,6 +848,7 @@ class TraeProvider:
         return [{"id": m["id"], "object": "model", "owned_by": "trae", "name": m["name"],
                  "route": m["route"], "streaming": m["streaming"], "source": m["source"],
                  "supports_vision": m.get("supports_vision") is True,
+                 "context_limit_chars": _NATIVE_PROMPT_BUDGET,
                  "input": ["text", "image"] if m.get("supports_vision") is True else ["text"]}
                 for m in self.status()["models"]]
 
@@ -1323,7 +1325,7 @@ class TraeProvider:
         try:
             tool_plan = prepare_tools(payload, force_framed=force_framed)
         except ToolBridgeError as error:
-            raise TraeError(error.status, error.message, error.code) from None
+            raise TraeError(error.status, error.message, error.code, extra=error.extra) from None
         messages = payload.get("messages")
         if not isinstance(messages, list) or not messages or len(messages) > 256:
             raise TraeError(400, "messages 必须为 1 至 256 条文本消息。", "invalid_messages")
@@ -1556,12 +1558,15 @@ class TraeProvider:
         if any(key in body for key in ("temperature", "top_p")):
             raise TraeError(422, "原生文本桥接未提供 temperature/top_p 控制，请移除这两个参数。", "unsupported_feature")
         credentials = self._credentials(row)
-        max_chars = max(256, min(65536, int(body.get("max_tokens", 512)) * 16))
+        # Character budget floor of 8192 so a small max_tokens can never trap
+        # the native client below a single reasoning pass; reasoning is checked
+        # separately in wb_trae_native and does not eat the response budget.
+        max_chars = max(8192, min(65536, int(body.get("max_tokens", 512)) * 16))
         try:
             options = {"images": body["_images"]} if body.get("_images") else {}
             value = self._native.chat(credentials.get("uid", ""), model[5:], body["messages"], max_chars=max_chars, **options)
         except NativeBridgeError as error:
-            failure = TraeError(error.status, error.message, error.code)
+            failure = TraeError(error.status, error.message, error.code, extra=error.extra)
             self._mark_error(row, failure)
             raise failure from None
         plan = body.get("_tool_plan")
@@ -1570,7 +1575,7 @@ class TraeProvider:
             try:
                 parsed = plan.parse(value["response"])
             except ToolBridgeError as error:
-                failure = TraeError(error.status, error.message, error.code)
+                failure = TraeError(error.status, error.message, error.code, extra=error.extra)
                 self._mark_error(row, failure)
                 raise failure from None
         response_id, created = "chatcmpl-trae-" + uuid.uuid4().hex, int(time.time())
@@ -1583,6 +1588,9 @@ class TraeProvider:
             metadata["tool_execution"] = "client"
             if parsed.get("response_format") in ("plain_text_final", "single_outer_close_final", "framed_json_v2"):
                 metadata["response_format"] = parsed["response_format"]
+        trim = (plan.trim_level if plan else 0) or value.get("context_trim", 0)
+        if trim:
+            metadata["context_trim"] = trim
 
         def chunk(delta, finish=None, usage=None):
             result = {"id": response_id, "created": created, "object": "chat.completion.chunk", "model": model,

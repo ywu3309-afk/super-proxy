@@ -123,6 +123,41 @@ class WorkBuddyHTTPErrorTests(unittest.TestCase):
         self.assertEqual(self.rows[0]["outcome"], "failed")
         return result
 
+    def test_truncated_body_answers_408_not_400(self):
+        """A peer that dies mid-body is a transport symptom, not bad JSON.
+
+        400 is on every SDK's do-not-retry list, so a truncated upload used to
+        become a manual resend. 408 keeps it retryable.
+        """
+        import socket
+        body = b'{"model":"deepseek-v4.1-flash","messages":[{"role":"user","content":"hi"}]}'
+        head = (
+            "POST /v1/chat/completions HTTP/1.1\r\n"
+            "Host: 127.0.0.1\r\n"
+            "Authorization: Bearer fixture-key\r\n"
+            "Content-Type: application/json\r\n"
+            "Content-Length: %d\r\n\r\n" % (len(body) + 500)
+        ).encode("ascii")
+        with socket.create_connection(("127.0.0.1", self.port), timeout=10) as sock:
+            sock.sendall(head + body)
+            sock.shutdown(socket.SHUT_WR)
+            chunks = []
+            while True:
+                data = sock.recv(4096)
+                if not data:
+                    break
+                chunks.append(data)
+        reply = b"".join(chunks)
+        self.assertTrue(reply, "gateway must answer the truncated upload")
+        status_line = reply.split(b"\r\n", 1)[0].decode("latin-1")
+        self.assertIn(" 408 ", status_line + " ", status_line)
+        self.assertIn("truncated", reply.decode("utf-8", "replace"))
+
+    def test_sse_responses_ask_proxies_not_to_buffer(self):
+        source = Path(wb_proxy.__file__).read_text(encoding="utf-8")
+        self.assertEqual(source.count('"X-Accel-Buffering", "no"'), 3,
+                         "every text/event-stream response must disable proxy buffering")
+
     def test_chat_and_responses_return_structured_11128_for_stream_and_nonstream(self):
         for path in ("/v1/chat/completions", "/v1/responses"):
             for stream in (False, True):

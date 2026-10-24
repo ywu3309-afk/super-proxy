@@ -12,6 +12,7 @@ import math
 import re
 import secrets
 from wb_trae_images import split_messages, ImageInputError, MAX_REQUEST_BYTES as MAX_IMAGE_REQUEST_BYTES
+from wb_trae_native import _middle_truncated, _native_history_prompt, _REQUEST_TOO_LARGE_SUGGEST
 
 
 MAX_REQUEST_BYTES = 2 * 1024 * 1024
@@ -47,15 +48,16 @@ _SCHEMA_KEYS = {"type", "properties", "required", "items", "enum", "const",
 
 
 class ToolBridgeError(Exception):
-    def __init__(self, status, message, code):
+    def __init__(self, status, message, code, extra=None):
         super().__init__(message)
         self.status = status
         self.message = message
         self.code = code
+        self.extra = extra if isinstance(extra, dict) else None
 
 
-def _error(message, code="invalid_tools", status=422):
-    raise ToolBridgeError(status, message, code)
+def _error(message, code="invalid_tools", status=422, extra=None):
+    raise ToolBridgeError(status, message, code, extra=extra)
 
 
 def _json(value):
@@ -130,6 +132,49 @@ def _compact_tool_history(messages, fits):
     if fits(with_marker):
         return with_marker
     return compacted
+
+
+def _truncate_systems_for_plan(messages, budget, prompt_size):
+    """Ladder ③ for the tool bridge: middle-truncate eligible system content.
+
+    Only system/developer messages whose own content fits the whole budget are
+    sliced, and only when at least a quarter of the content is retained.
+    Returns a new message list, or None when no eligible truncation exists.
+    """
+    current = [copy.deepcopy(message) for message in messages]
+    while True:
+        size = prompt_size(current)
+        if size <= budget:
+            return current
+        best = None
+        best_units = 0
+        for index, item in enumerate(current):
+            if not isinstance(item, dict) or item.get("role") not in ("system", "developer"):
+                continue
+            content = item.get("content")
+            if isinstance(content, str):
+                text = content
+            elif isinstance(content, list):
+                text = "".join(part.get("text", "") for part in content
+                               if isinstance(part, dict) and part.get("type") == "text")
+            else:
+                continue
+            units = _utf16_length(text)
+            if units > budget:
+                continue
+            if units > best_units:
+                best, best_units = index, units
+        if best is None:
+            return None
+        content = current[best]["content"]
+        text = content if isinstance(content, str) else "".join(
+            part.get("text", "") for part in content
+            if isinstance(part, dict) and part.get("type") == "text")
+        keep = best_units - (size - budget) - 48
+        if keep < max(2000, best_units // 4):
+            return None
+        truncated = _middle_truncated(text, keep)
+        current[best]["content"] = truncated if isinstance(content, str) else [{"type": "text", "text": truncated}]
 
 
 _PROMPT_SCHEMA_DROP_KEYS = {
@@ -526,6 +571,7 @@ class ToolPlan:
     max_output_chars: int = MAX_OUTPUT_CHARS
     protocol: str = "json_envelope"
     images: list = field(default_factory=list)
+    trim_level: int = 0
 
     @property
     def tool_names(self):
@@ -754,32 +800,71 @@ def prepare(payload, *, force_framed=None):
             _index_prompt_tools(tools, choice=choice, forced=forced, minimal=True),
         ])
 
-    data = None
-    for prompt_tools in definition_variants:
-        def make_data(candidate, definitions=prompt_tools):
-            return _json({"tools": definitions, "messages": candidate, "tool_choice": choice,
-                          "forced_name": forced, "parallel_tool_calls": parallel})
+    smallest = [None]
 
-        def fits(candidate):
-            return _utf16_length(instruction + make_data(candidate) + reminder) <= budget
+    def attempt(source):
+        for index, prompt_tools in enumerate(definition_variants):
+            def make_data(candidate, definitions=prompt_tools):
+                return _json({"tools": definitions, "messages": candidate, "tool_choice": choice,
+                              "forced_name": forced, "parallel_tool_calls": parallel})
 
-        candidate_messages = messages
-        if not fits(candidate_messages):
-            try:
-                candidate_messages = _compact_tool_history(candidate_messages, fits)
-            except ToolBridgeError as error:
-                if error.code != "request_too_large":
-                    raise
-                continue
-        candidate_data = make_data(candidate_messages)
-        if _utf16_length(instruction + candidate_data + reminder) <= budget:
-            data = candidate_data
-            break
+            def prompt_size(candidate):
+                # Measure the EXACT native prompt the bridge will receive, so a
+                # plan that fits here can never be rejected inside the native
+                # client by JSON re-serialization escape overhead.
+                converted = [{"role": "system", "content": instruction},
+                             {"role": "user", "content": make_data(candidate)},
+                             {"role": "system", "content": reminder}]
+                return _utf16_length(_native_history_prompt(converted))
+
+            def fits(candidate):
+                size = prompt_size(candidate)
+                if smallest[0] is None or size < smallest[0]:
+                    smallest[0] = size
+                return size <= budget
+
+            candidate_messages = source
+            dropped = False
+            if not fits(candidate_messages):
+                try:
+                    candidate_messages = _compact_tool_history(candidate_messages, fits)
+                    dropped = candidate_messages is not source
+                except ToolBridgeError as error:
+                    if error.code != "request_too_large":
+                        raise
+                    continue
+            candidate_data = make_data(candidate_messages)
+            if fits(candidate_messages):
+                return candidate_data, 2 if index > 0 else (1 if dropped else 0)
+        return None, 0
+
+    data, trim_level = attempt(messages)
+    if data is None:
+        # Level 3: middle-truncate an eligible system prompt, then retry the
+        # whole definition-variant ladder with the compacted transcript.
+        compact_defs = definition_variants[-1]
+
+        def probe_size(candidate):
+            converted = [{"role": "system", "content": instruction},
+                         {"role": "user", "content": _json({"tools": compact_defs, "messages": candidate,
+                             "tool_choice": choice, "forced_name": forced, "parallel_tool_calls": parallel})},
+                         {"role": "system", "content": reminder}]
+            return _utf16_length(_native_history_prompt(converted))
+
+        truncated = _truncate_systems_for_plan(messages, budget, probe_size)
+        if truncated is not None:
+            data, trim_level = attempt(truncated)
+            if data is not None:
+                trim_level = 3
 
     if data is None:
-        _error("工具定义或当前消息本身超过 TRAE 原生上下文限制。", "request_too_large", 413)
+        extra = {"budget_chars": budget, "suggest": _REQUEST_TOO_LARGE_SUGGEST}
+        if smallest[0] is not None:
+            extra["context_chars"] = smallest[0]
+        _error("工具定义或当前消息本身超过 TRAE 原生上下文限制。", "request_too_large", 413, extra=extra)
     converted = [{"role": "system", "content": [{"type": "text", "text": instruction}]},
                  {"role": "user", "content": [{"type": "text", "text": data}]},
                  {"role": "system", "content": [{"type": "text", "text": reminder}]}]
     return ToolPlan(converted, nonce, schemas, choice, forced, parallel,
-                    protocol="framed_json_v2" if framed else "json_envelope", images=images)
+                    protocol="framed_json_v2" if framed else "json_envelope", images=images,
+                    trim_level=trim_level)
