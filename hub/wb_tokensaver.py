@@ -49,7 +49,7 @@ LOCAL_KINDS = ("quota", "command_prefix", "title", "suggestion", "file_path")
 # 总开关默认开、两条压缩线默认开、提示词与本地应答默认关：默认行为只在
 # 「上游看到的正文更小」这一侧变化，不改变模型怎么说话，也不替客户端答题。
 DEFAULT_CONFIG = {
-    "enabled": True,
+    "enabled": False,
     "prompt": {"caveman": "off", "ponytail": "off"},
     "rtk": True,
     "local": {

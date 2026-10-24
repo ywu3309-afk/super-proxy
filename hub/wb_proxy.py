@@ -511,6 +511,39 @@ def _routing_provider_ready(provider, realm):
         return False
 
 
+def _routing_unhealthy():
+    """路由成员临时黑名单：{base: 到期时间戳}。过期的顺手丢掉。"""
+    try:
+        data = wb_settings.load(ACCOUNTS_DIR) or {}
+        raw = data.get("routing_unhealthy") or {}
+        now = time.time()
+        return {str(k): float(v) for k, v in raw.items() if float(v) > now}
+    except Exception:
+        return {}
+
+
+def mark_routing_unhealthy(base, seconds=600, reason=""):
+    """把某个池子成员拉黑一段时间：参数被上游拒绝时用。"""
+    if not base:
+        return
+    try:
+        with wb_settings._lock:
+            data = wb_settings.load(ACCOUNTS_DIR) or {}
+            now = time.time()
+            table = {k: v for k, v in (data.get("routing_unhealthy") or {}).items()
+                     if float(v) > now}
+            table[str(base)] = now + float(seconds)
+            data["routing_unhealthy"] = table
+            wb_settings.save(ACCOUNTS_DIR, data)
+        log("routing: member %s unhealthy for %ss (%s)"
+            % (base, seconds, reason or "-"), level="INFO")
+    except Exception as exc:
+        try:
+            log("routing: mark unhealthy failed: %s" % exc)
+        except Exception:
+            pass
+
+
 def _routing_candidates(realm=None):
     """池子里可参与路由的成员（去掉面板停用的、没有可用账号的网关）。"""
     try:
@@ -553,6 +586,21 @@ def _routing_candidates(realm=None):
             ready[key] = _routing_provider_ready(item["provider"], item["realm"])
         item["ready"] = ready[key]
     usable = [item for item in out if item.get("ready")]
+    # 上游按参数拒绝过（11133 这类）的成员进临时黑名单：冷却期内不再让它
+    # 参选，否则按用量排序的策略会反复把请求送到同一个坏成员上。
+    # 全都被拉黑时退回原列表——空池子比让请求直接失败更糟。
+    unhealthy = _routing_unhealthy()
+    if unhealthy:
+        now = time.time()
+        for item in out:
+            item["unhealthy_for"] = max(0, int(round(unhealthy.get(str(item["base"]), 0) - now)))
+        fresh = [item for item in usable if str(item["base"]) not in unhealthy]
+        if fresh:
+            for item in fresh:
+                item["filtered"] = True
+            return fresh
+        for item in usable:
+            item["filtered"] = False
     return usable or out
 
 
@@ -17776,6 +17824,11 @@ class Handler(BaseHTTPRequestHandler):
         if "11102" in detail:
             MODEL_BLOCK_GATE.note_blocked(
                 model, getattr(exc, "account_uid", None))
+        # 11133 = 上游「参数被模型供应商拒绝」。同一个 body 打别的模型能成，
+        # 说明是这个成员自己不吃这套参数：拉黑它一段时间，让下一次选路绕开，
+        # 而不是每个请求都反复撞同一个坏成员。
+        if "11133" in detail:
+            mark_routing_unhealthy(model, 600, reason="param_rejected_11133")
         error = wb_upstream_errors.classify_workbuddy_error(
             exc.code, detail, model=model)
         # Unknown errors retain the old bounded textual envelope. A confirmed
