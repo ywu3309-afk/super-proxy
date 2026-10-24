@@ -161,7 +161,7 @@ npm run release:publish
 
 ## 上游说明
 
-网关核心来源于 `ardeyouxipianyi/workbuddy2api-hub`；WorkDaddy 集成参考来自 `babygoton/WorkDaddy`。原上游许可与说明见 `licenses/`。这些文件保留各自原始许可，不为整个融合项目重新声明统一许可证。
+网关核心来源于 `ardeyouxipianyi/workbuddy2api-hub`；WorkDaddy 集成参考来自 `babygoton/WorkDaddy`；`wb_tokensaver.py` 与 `wb_zen.py` 移植自 `cty1735/wb-proxy`（MIT，许可证见 `licenses/wb-proxy-LICENSE.txt`）。原上游许可与说明见 `licenses/`。这些文件保留各自原始许可，不为整个融合项目重新声明统一许可证。
 
 ## 打包便携版
 
