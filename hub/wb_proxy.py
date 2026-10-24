@@ -17813,7 +17813,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def _upstream_http_error(self, exc, model, t_start):
         try:
-            detail = wb_upstream_errors.read_http_error_detail(exc)
+            # 重试分支可能已经读过一次响应体；HTTPError 的 fp 读完就空，
+            # 所以优先用缓存下来的那份，别让最终错误信封变成"body unavailable"。
+            detail = getattr(exc, "_wb_detail", None)
+            if detail is None:
+                detail = wb_upstream_errors.read_http_error_detail(exc)
+                try:
+                    exc._wb_detail = detail
+                except Exception:
+                    pass
         except (OSError, http.client.HTTPException) as read_exc:
             # Keep the original HTTP rejection even if its body is interrupted.
             detail = "upstream error body unavailable (%s)" % type(read_exc).__name__
@@ -18182,6 +18190,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(401, "panel password required", "invalid_request_error")
         if path == "/providers/trae" or path.startswith("/providers/trae/"):
             return wb_trae_http.management(self, path, wb_trae_http.provider_for(ACCOUNTS_DIR))
+        if path == "/api/third-party-channels" or path.startswith("/api/third-party-channels/"):
+            return wb_external_http.panel_api(self, path, external_store())
         if path == "/providers/external" or path.startswith("/providers/external/"):
             return wb_external_http.management(self, path, external_store())
         if path in ("/", "/dashboard", "/ui"):
@@ -21193,6 +21203,8 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?")[0]
         if path == "/providers/trae" or path.startswith("/providers/trae/"):
             return wb_trae_http.management(self, path, wb_trae_http.provider_for(ACCOUNTS_DIR), write=True)
+        if path == "/api/third-party-channels" or path.startswith("/api/third-party-channels/"):
+            return wb_external_http.panel_api(self, path, external_store(), write=True)
         if path == "/providers/external" or path.startswith("/providers/external/"):
             return wb_external_http.management(self, path, external_store(), write=True)
         if path == "/console/toggle":
@@ -21389,6 +21401,11 @@ class Handler(BaseHTTPRequestHandler):
 
 
     def _dispatch_chat_post(self, path, payload):
+        # 同一条 keep-alive 连接上会复用同一个 handler 实例：每次新请求都要
+        # 把路由重试状态清掉，否则上一轮的 _route_requested 会串到这一轮。
+        if not payload.get("_route_retry"):
+            self._route_requested = None
+            self._route_retry_count = 0
         # 先挡背景请求：Codex 自己发的（记忆整理／环境建议／自动复核）
         # 不算「使用者实际使用」，一律本地拒绝，不碰上游。
         if BLOCK_BACKGROUND_REQUESTS:
@@ -21418,6 +21435,11 @@ class Handler(BaseHTTPRequestHandler):
                     level="INFO")
             except Exception:
                 pass
+            # 记住「客户端点的那张牌」：上游按参数拒绝时要用它重新选一个候选，
+            # 此时 payload["model"] 已经被改写成具体成员了。
+            self._route_requested = payload.get("model")
+            # 同一次请求内重试会递归回到这里：计数不能被重置，否则会无限重试。
+            self._route_retry_count = getattr(self, "_route_retry_count", 0)
             payload["model"] = route["model"]
         else:
             pool = split_pool_model(payload.get("model"))
@@ -21507,6 +21529,9 @@ class Handler(BaseHTTPRequestHandler):
                          key=self._key_id())
             return self._rate_limited(exc)
         except urllib.error.HTTPError as exc:
+            retried = self._retry_routed_param_reject(exc, self.path.split("?")[0], payload)
+            if retried is not None:
+                return retried
             return self._upstream_http_error(exc, model, t_start)
         except Exception as exc:
             message = str(exc)
@@ -21578,6 +21603,42 @@ class Handler(BaseHTTPRequestHandler):
             if payload.get("stream"):
                 return self._chat_stream_response(upstream, model, {}, stub, t_start)
             return self._chat_nonstream_response(upstream, model, {}, stub, t_start)
+
+    def _retry_routed_param_reject(self, exc, path, payload):
+        """上游「参数被拒」（11133）时，同一次请求内换一个池子成员再试。
+
+        只在 route/* 请求上生效，最多换两次。被拒的成员先记进黑名单，再把模型名
+        改回客户端点的那张牌重新选路——重新选出来的候选一定不是刚才那个。
+        返回 None 表示不重试，由调用方按原样回错误。
+        """
+        requested = getattr(self, "_route_requested", None)
+        attempts = getattr(self, "_route_retry_count", 0)
+        if not requested or attempts >= 2:
+            return None
+        try:
+            detail = getattr(exc, "_wb_detail", None)
+            if detail is None:
+                detail = wb_upstream_errors.read_http_error_detail(exc)
+                try:
+                    exc._wb_detail = detail
+                except Exception:
+                    pass
+        except Exception:
+            return None
+        if "11133" not in (detail or ""):
+            return None
+        failed = payload.get("model")
+        mark_routing_unhealthy(failed, 600, reason="param_rejected_11133")
+        self._route_retry_count = attempts + 1
+        retry_payload = dict(payload)
+        retry_payload["_route_retry"] = attempts + 1
+        retry_payload["model"] = requested
+        try:
+            log("routing: %s rejected params on %s, retrying (attempt %d)"
+                % (requested, failed, attempts + 1), level="INFO")
+        except Exception:
+            pass
+        return self._dispatch_chat_post(path, retry_payload)
 
     def _chat_stream_response(self, upstream, model, fp, account, t_start, effort=None):
             self.send_response(200)
