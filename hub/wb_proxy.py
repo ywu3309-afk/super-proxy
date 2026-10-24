@@ -82,6 +82,7 @@ import wb_external
 import wb_external_http
 import wb_upstream_errors
 import wb_tokensaver
+import wb_zen
 IS_WINDOWS = os.name == "nt"
 
 # ---- 一键配置客户端（wb_agents）的可用性判定（issue #246）----
@@ -308,6 +309,430 @@ BACKGROUND_MODEL_NAMES = tuple(
 )
 
 
+def egg_prefix_for(model_id, source):
+    """免费模型的选路前缀：Kilo 免费池用 kilo/，其余（Zen 车道、兜底）用 zen/。
+
+    两种前缀都只提示来源，真正路由由 wb_zen.resolve() 决定；自建供应商池的
+    条目（source 是池 id）同样走 zen/ 前缀进鸡蛋分发，再由池模块接管。
+    """
+    if str(source or "").lower() == "kilo":
+        return "kilo/"
+    return "zen/"
+
+
+# ---------------------------------------------------------------------------
+# 路由总池子（route/* 控制模型 → 从池子里挑一个成员转发）
+# ---------------------------------------------------------------------------
+POOL_SEP = " · "
+POOL_GATEWAY_LABELS = {"workbuddy": "WorkBuddy", "trae": "Trae"}
+POOL_REALM_LABELS = {"intl": "global", "cn": "cn"}
+POOL_PROVIDER_ORDER = ("workbuddy", "trae")
+POOL_REALM_ORDER = ("intl", "cn")
+ROUTING_MODEL_PREFIX = "route/"
+ROUTING_LABELS = {
+    "smart": "智能",
+    "order": "顺序",
+    "rotate": "轮换",
+    "usage": "用量",
+    "pace": "节奏",
+}
+ROUTING_DESCS = {
+    "smart": "在还有额度的网关里，优先用最快重置的那个",
+    "order": "按池子顺序，先用第一个成员",
+    "rotate": "每轮换下一个成员，把负载摊开",
+    "usage": "优先用最近 24 小时请求最少的成员",
+    "pace": "优先距重置前每小时剩余额度最多的成员",
+}
+_pool_cache = {"at": 0.0, "realm": None, "data": None}
+_pool_cache_lock = threading.Lock()
+POOL_CACHE_TTL = 60.0
+_routing_lock = threading.Lock()
+_routing_decisions = deque(maxlen=200)
+_routing_rotate = {"n": 0}
+_routing_sessions = {}
+ROUTING_SESSION_TTL = 1800
+
+
+def pool_suffix(provider, realm=None, label=None):
+    """模型 id 里「·」后面那一段。"""
+    p = str(provider or "").strip().lower()
+    if p == "egg":
+        return str(label or "鸡蛋").strip() or "鸡蛋"
+    if p in POOL_GATEWAY_LABELS:
+        r = realm if realm in ("intl", "cn") else "intl"
+        return "%s-%s" % (POOL_GATEWAY_LABELS[p], POOL_REALM_LABELS[r])
+    return str(label or provider or "").strip()
+
+
+def pool_public_id(model, provider, realm=None, label=None):
+    """「模型名 · 供应商」公开 id：客户端用它钉死某个网关出口。"""
+    base = str(model or "").strip()
+    if not base:
+        return ""
+    return base + POOL_SEP + pool_suffix(provider, realm, label)
+
+
+def split_pool_model(model):
+    """把 ``模型名 · 供应商`` 拆回 (基础 id, 网关, 出口)。
+
+    返回 None 表示这不是池子里的公开 id（旧客户端仍用不带后缀的 id）。
+    「·」后面不是网关名时按鸡蛋的供应商名处理：鸡蛋的池子名是操作者自己起
+    的，没法预先枚举；基础 id 是否真的属于鸡蛋由 wb_zen.resolve 再判一次。
+    """
+    name = str(model or "").strip()
+    if not name or POOL_SEP not in name:
+        return None
+    base, label = name.rsplit(POOL_SEP, 1)
+    base = base.strip()
+    label = label.strip()
+    if not base or not label:
+        return None
+    for provider in POOL_PROVIDER_ORDER:
+        for realm in POOL_REALM_ORDER:
+            if label == "%s-%s" % (POOL_GATEWAY_LABELS[provider],
+                                   POOL_REALM_LABELS[realm]):
+                return {"model": base, "provider": provider,
+                        "realm": realm, "label": label}
+    return {"model": base, "provider": "egg", "realm": None, "label": label}
+
+
+def routing_strategy_of(model):
+    """``route/*`` 控制模型 → 策略；不是路由模型时返回 None。"""
+    name = str(model or "").strip().lower()
+    if name in ("route", "route/auto"):
+        return "auto"
+    if name.startswith(ROUTING_MODEL_PREFIX):
+        strategy = name[len(ROUTING_MODEL_PREFIX):].strip()
+        if strategy in wb_settings.ROUTING_STRATEGIES:
+            return strategy
+    return None
+
+
+def routing_model_entries():
+    """``/v1/models`` 里的路由控制模型（排在池子最前面）。"""
+    out = [{
+        "id": "route/auto",
+        "object": "model",
+        "created": int(time.time()),
+        "owned_by": "routing",
+        "name": "自动路由 · 路由",
+        "description": "按「路由」页选定的策略从池子里挑一个成员",
+        "pool_provider": "routing",
+        "pool_label": "路由",
+        "capabilities": {"vision": False, "tool_calls": True, "reasoning": False},
+        "supports_tool_calls": True,
+    }]
+    for strategy in wb_settings.ROUTING_STRATEGIES:
+        out.append({
+            "id": ROUTING_MODEL_PREFIX + strategy,
+            "object": "model",
+            "created": int(time.time()),
+            "owned_by": "routing",
+            "name": "路由 · %s" % ROUTING_LABELS[strategy],
+            "description": ROUTING_DESCS[strategy],
+            "pool_provider": "routing",
+            "pool_label": "路由",
+            "capabilities": {"vision": False, "tool_calls": True, "reasoning": False},
+            "supports_tool_calls": True,
+        })
+    return out
+
+
+def fetch_pool_models(realm=None):
+    """池子清单：workbuddy 目录 + TRAE 目录 + zen/kilo 免费目录。
+
+    60s 缓存：/v1/models 与 /routing 都会读它，别让每次轮询都去上游走目录。
+    三条通道各自失败不影响其余两条（每条都吃自己的异常）。
+    """
+    now = time.time()
+    r = realm or CURRENT_REALM
+    with _pool_cache_lock:
+        hit = _pool_cache
+        if (hit["data"] is not None and hit["realm"] == r
+                and now - hit["at"] < POOL_CACHE_TTL):
+            return hit["data"]
+    entries = []
+    try:
+        for mid, meta in (fetch_models(realm=r) or []):
+            entries.append((pool_public_id(mid, "workbuddy", r), {
+                "pool_provider": "workbuddy", "pool_realm": r,
+                "pool_model": mid, "pool_label": ""}))
+    except Exception:
+        pass
+    try:
+        for m in (wb_trae_http.provider_for(ACCOUNTS_DIR).models() or []):
+            tid = str((m or {}).get("id") or "")
+            if not tid.startswith("trae/"):
+                continue
+            entries.append((pool_public_id(tid, "trae", "intl"), {
+                "pool_provider": "trae", "pool_realm": "intl",
+                "pool_model": tid, "pool_label": ""}))
+    except Exception:
+        pass
+    try:
+        for m in (wb_zen.static_catalog() or []):
+            mid = str((m or {}).get("id") or "").strip()
+            if not mid:
+                continue
+            source = str((m or {}).get("source") or "zen").strip().lower() or "zen"
+            label = "Kilo" if source == "kilo" else "OpenCode Zen"
+            base = egg_prefix_for(mid, source) + mid
+            entries.append((pool_public_id(base, "egg", None, label), {
+                "pool_provider": "egg", "pool_realm": None,
+                "pool_model": base, "pool_label": label,
+                "egg_source": source}))
+    except Exception:
+        pass
+    with _pool_cache_lock:
+        _pool_cache.update({"at": time.time(), "realm": r, "data": entries})
+    return entries
+
+
+def _routing_provider_ready(provider, realm):
+    """该网关出口有没有可用账号（鸡蛋只要目录有就视为可用）。"""
+    if provider == "egg":
+        return True
+    if provider == "trae":
+        try:
+            accounts = ((wb_trae_http.provider_for(ACCOUNTS_DIR).status()
+                         or {}).get("accounts") or [])
+            now = time.time()
+            return any((a.get("enabled") is True)
+                       and str(a.get("status") or "") != "login_expired"
+                       and float(a.get("cooldownUntil") or 0) <= now
+                       for a in accounts)
+        except Exception:
+            return False
+    try:
+        # 「all」是合并视图：账户的 realm 是 cn/intl，按 all 过滤会得 0。
+        q = realm if realm in ("intl", "cn") else None
+        return (POOL.count_ready(realm=q) if POOL else 0) > 0
+    except Exception:
+        return False
+
+
+def _routing_candidates(realm=None):
+    """池子里可参与路由的成员（去掉面板停用的、没有可用账号的网关）。"""
+    try:
+        entries = fetch_pool_models(realm=realm)
+    except Exception:
+        return []
+    out = []
+    for public, meta in entries:
+        provider = (meta or {}).get("pool_provider")
+        entry_realm = (meta or {}).get("pool_realm")
+        base = (meta or {}).get("pool_model") or public
+        try:
+            if wb_settings.is_model_disabled(ACCOUNTS_DIR, base, provider,
+                                             entry_realm):
+                continue
+        except Exception:
+            pass
+        if provider == "egg":
+            # 正在冷却的免费模型去了也白去：直接从候选里剔除。
+            bare = str(base or "").split("/", 1)[-1]
+            try:
+                if wb_zen.cooldown_hit(bare) is not None:
+                    continue
+            except Exception:
+                pass
+        out.append({
+            "index": len(out),
+            "public": public,
+            "base": base,
+            "provider": provider,
+            "realm": entry_realm,
+            "label": (meta or {}).get("pool_label") or "",
+        })
+    if not out:
+        return out
+    ready = {}
+    for item in out:
+        key = (item["provider"], item["realm"])
+        if key not in ready:
+            ready[key] = _routing_provider_ready(item["provider"], item["realm"])
+        item["ready"] = ready[key]
+    usable = [item for item in out if item.get("ready")]
+    return usable or out
+
+
+def _routing_quotas():
+    """每个网关的额度概况（smart / pace 用）：最早重置、剩余量、每小时剩余。
+
+    剩余额度表目前只有 workbuddy 账号池（TRAE / 鸡蛋有各自的冷却与额度
+    状态），所以表里只有 workbuddy 一个出口；其余出口在 smart / pace 下
+    自然排在「可用」的后面。
+    """
+    try:
+        rows = (remaining_usage() or {}).get("rows") or []
+    except Exception:
+        rows = []
+    quotas = {}
+    now = time.time()
+    for row in rows:
+        remaining = row.get("remaining")
+        if remaining is None or remaining <= 0:
+            continue
+        bucket = quotas.setdefault("workbuddy", {
+            "available": True, "remaining": 0.0,
+            "reset_at": None, "pace": 0.0,
+        })
+        bucket["remaining"] += remaining
+        reset_at = row.get("reset_at")
+        if reset_at:
+            if bucket["reset_at"] is None or reset_at < bucket["reset_at"]:
+                bucket["reset_at"] = reset_at
+            hours = max(0.25, (reset_at - now) / 3600.0)
+            bucket["pace"] += remaining / hours
+    return quotas
+
+
+def _routing_rank(candidates, strategy, advance=True):
+    """按策略给候选排序；rotate 返回轮换起点后的顺序。"""
+    items = list(candidates)
+    if not items:
+        return items
+    if strategy == "order":
+        return items
+    if strategy == "rotate":
+        if not advance:
+            return items
+        with _routing_lock:
+            n = _routing_rotate["n"]
+            _routing_rotate["n"] = n + 1
+        k = n % len(items)
+        return items[k:] + items[:k]
+    if strategy == "usage":
+        try:
+            by_model = (usage_snapshot(range="24h", realm="all")
+                        or {}).get("by_model") or {}
+        except Exception:
+            by_model = {}
+
+        def used(item):
+            return int(((by_model.get(item["base"]) or {}).get("requests")) or 0)
+
+        return sorted(items, key=lambda item: (used(item), item["index"]))
+    quotas = _routing_quotas()
+
+    def score(item):
+        quota = quotas.get(item["provider"]) or {}
+        available = bool(quota.get("available"))
+        if strategy == "pace":
+            return (not available, -(quota.get("pace") or 0.0), item["index"])
+        # smart：可用 > 最快重置 > 剩余多
+        return (not available,
+                quota.get("reset_at") or float("inf"),
+                -(quota.get("remaining") or 0.0),
+                item["index"])
+
+    return sorted(items, key=score)
+
+
+def resolve_routing_model(strategy, headers=None, payload=None, advance=True):
+    """按策略挑一个池子成员；返回可直接写回 payload 的路由结果。"""
+    chosen = "auto" if strategy in (None, "", "auto") else str(strategy)
+    if chosen == "auto":
+        try:
+            chosen = wb_settings.routing_config(ACCOUNTS_DIR)["strategy"]
+        except Exception:
+            chosen = wb_settings.ROUTING_DEFAULT_STRATEGY
+    candidates = _routing_candidates()
+    ranked = _routing_rank(candidates, chosen, advance=advance)
+    if not ranked:
+        return None
+    session = None
+    try:
+        session = extract_session_key(headers or {}, payload or {})
+    except Exception:
+        session = None
+    reason = "strategy:%s" % chosen
+    selected = ranked[0]
+    # 对话粘性（magpie 同款）：同一会话上一轮用过的成员还在候选里就继续用它，
+    # 厂商的提示词缓存才保得住。轮换策略例外——它要的就是每轮换一个。
+    if session and chosen != "rotate":
+        now = time.time()
+        with _routing_lock:
+            sticky = _routing_sessions.get(session)
+        if sticky and now - sticky.get("at", 0) < ROUTING_SESSION_TTL:
+            for item in ranked:
+                if item["public"] == sticky.get("model"):
+                    selected = item
+                    reason = "session-sticky"
+                    break
+        with _routing_lock:
+            _routing_sessions[session] = {"model": selected["public"],
+                                          "at": now}
+            if len(_routing_sessions) > 2000:
+                for key in [k for k, v in _routing_sessions.items()
+                            if now - v.get("at", 0) > ROUTING_SESSION_TTL]:
+                    _routing_sessions.pop(key, None)
+    return {
+        "strategy": chosen,
+        "reason": reason,
+        "public": selected["public"],
+        "model": selected["base"],
+        "provider": selected["provider"],
+        "realm": selected["realm"],
+        "label": selected["label"],
+        "session": session,
+    }
+
+
+def record_routing_decision(requested, route):
+    """把一次路由决策放进环形缓冲，路由页实时展示。"""
+    if not route:
+        return
+    with _routing_lock:
+        _routing_decisions.appendleft({
+            "at": time.time(),
+            "requested": str(requested or ""),
+            "strategy": route.get("strategy"),
+            "reason": route.get("reason"),
+            "model": route.get("public"),
+            "base": route.get("model"),
+            "provider": route.get("provider"),
+            "realm": route.get("realm"),
+            "label": route.get("label"),
+        })
+
+
+def routing_status(full=False):
+    """路由页数据：策略、候选排名（预览，不推进轮换）、最近的决策。
+
+    ``full=True`` 给完整候选排名（明细弹窗用），默认只回前 40 条预览：
+    5 秒一轮的轮询没必要背着上百行不要看的排名。
+    """
+    try:
+        config = wb_settings.routing_config(ACCOUNTS_DIR)
+    except Exception:
+        config = {"strategy": wb_settings.ROUTING_DEFAULT_STRATEGY}
+    candidates = _routing_candidates()
+    ranked = _routing_rank(candidates, config["strategy"], advance=False)
+    shown = ranked if full else ranked[:40]
+    preview = [{
+        "model": item["public"],
+        "base": item["base"],
+        "provider": item["provider"],
+        "realm": item["realm"],
+        "label": item["label"],
+        "ready": item.get("ready"),
+    } for item in shown]
+    with _routing_lock:
+        decisions = list(_routing_decisions)[:40]
+    return {
+        "config": config,
+        "strategies": [{
+            "id": strategy,
+            "label": ROUTING_LABELS[strategy],
+            "desc": ROUTING_DESCS[strategy],
+        } for strategy in wb_settings.ROUTING_STRATEGIES],
+        "models": preview,
+        "candidates": len(candidates),
+        "decisions": decisions,
+    }
+
+
 def _apply_token_saver(payload):
     """Compress prompt/tool output before it reaches the upstream (fail-open).
 
@@ -347,6 +772,18 @@ def _apply_background_model_alias(payload):
 # the cache and fall back to the endpoint.
 PRODUCT_CONFIG_CACHE = os.path.join(os.path.expanduser("~"), ".workbuddy-ai", "cache", "acc-product-config-v3.json")
 NOISE_KEYS = ("extra_fields", "refusal", "reasoning_content")
+class _ZenAccount(object):
+    """Placeholder account for the credential-free upstreams (Zen / Kilo).
+
+    The response writers record usage with ``account.uid``; these channels have no
+    account and no credits, so the ledger marks them with a synthetic id instead
+    of touching the WorkBuddy pool.
+    """
+
+    def __init__(self, uid):
+        self.uid = uid
+
+
 class BodyTooLarge(Exception):
     """Raised when a request body exceeds the configured cap."""
     def __init__(self, length):
@@ -13400,6 +13837,126 @@ _RESTRICTION_LOCK = threading.Lock()
 _RESTRICTION_EVENTS = {}   # realm -> {uid: epoch}（窗口内被限制的账号）
 _RESTRICTION_HOLD = {}     # realm -> 暂停到哪个 epoch
 
+# ---- 跨账号 fail-fast 闸门（workbuddy2api internal/rotateguard 移植）----
+# WAFGate：同一个出口 IP 在 60s 窗内被上游 WAF 403（空体/HTML/纯文本，无业务
+# 信封）拦过 >=2 个不同账号时，说明是 IP 级频控——继续换号只会把一次拦截放大
+# 成 N 倍请求量。闸门合上后所有 chat 请求快速失败（不发任何上游请求），
+# 直到窗口过去。激活期内再次命中不续期、不记账。
+WAF_GATE_WINDOW = 60.0
+WAF_GATE_THRESHOLD = 2
+WAF_ACCOUNT_COOLDOWN = 60.0
+# ModelBlockGate：同一模型名在 60s 窗内被 >=2 个不同账号以上游「模型不存在」
+# （11102）拒绝时，说明模型名本身是坏的——继续换号会把 (账号,模型) 负缓存
+# 犁满全池。闸门按模型分桶，激活期内不续期。
+MODEL_BLOCK_GATE_WINDOW = 60.0
+MODEL_BLOCK_GATE_THRESHOLD = 2
+
+
+class WAFGate(object):
+    def __init__(self, window=WAF_GATE_WINDOW, threshold=WAF_GATE_THRESHOLD):
+        self.window = window
+        self.threshold = threshold
+        self._lock = threading.Lock()
+        self._hits = {}   # uid -> epoch
+        self._until = 0.0
+
+    def active(self):
+        return time.time() < self._until
+
+    def remaining(self):
+        return max(0.0, self._until - time.time())
+
+    def message(self):
+        return ("upstream WAF block active on this egress IP: %d accounts hit "
+                "403 within %ds, fail-fast for %.0fs"
+                % (self.threshold, int(self.window), self.remaining()))
+
+    def note_waf(self, uid):
+        """记一次 WAF 命中；返回 True = 闸门已合上（含本次触发）。"""
+        if not uid:
+            return self.active()
+        now = time.time()
+        with self._lock:
+            if now < self._until:
+                return True
+            self._hits[uid] = now
+            for u in [u for u, t in self._hits.items()
+                      if now - t > self.window]:
+                del self._hits[u]
+            if len(self._hits) >= self.threshold:
+                self._until = now + self.window
+                self._hits.clear()
+                log("waf gate ACTIVE: %d accounts hit upstream WAF 403 within "
+                    "%ds, fail-fast until %s"
+                    % (self.threshold, int(self.window),
+                       time.strftime("%H:%M:%S",
+                                     time.localtime(self._until))),
+                    tag="waf-gate")
+                return True
+        return False
+
+
+class ModelBlockGate(object):
+    def __init__(self, window=MODEL_BLOCK_GATE_WINDOW,
+                 threshold=MODEL_BLOCK_GATE_THRESHOLD):
+        self.window = window
+        self.threshold = threshold
+        self._lock = threading.Lock()
+        self._hits = {}   # model -> {uid: epoch}
+        self._until = {}  # model -> epoch
+
+    def active(self, model):
+        return bool(model) and time.time() < self._until.get(model, 0.0)
+
+    def remaining(self, model):
+        return max(0.0, self._until.get(model, 0.0) - time.time())
+
+    def message(self, model):
+        return ("model '%s' rejected by %d accounts within %ds: upstream "
+                "reports this model does not exist, fail-fast for %.0fs"
+                % (model, self.threshold, int(self.window),
+                   self.remaining(model)))
+
+    def note_blocked(self, model, uid):
+        """记一次 11102（模型不存在）；返回 True = 该模型闸门已合上。"""
+        if not model or not uid:
+            return self.active(model)
+        now = time.time()
+        with self._lock:
+            if now < self._until.get(model, 0.0):
+                return True
+            bucket = self._hits.setdefault(model, {})
+            bucket[uid] = now
+            for u in [u for u, t in bucket.items() if now - t > self.window]:
+                del bucket[u]
+            if len(bucket) >= self.threshold:
+                self._until[model] = now + self.window
+                self._hits.pop(model, None)
+                log("model-block gate ACTIVE: model '%s' rejected by %d "
+                    "accounts within %ds, fail-fast until %s"
+                    % (model, self.threshold, int(self.window),
+                       time.strftime("%H:%M:%S",
+                                     time.localtime(self._until[model]))),
+                    tag="model-block-gate")
+                return True
+        return False
+
+
+WAF_GATE = WAFGate()
+MODEL_BLOCK_GATE = ModelBlockGate()
+
+
+def _has_business_envelope(detail):
+    """403 body 是否带上游业务信封（JSON 含 "code"/"msg" 键）。
+
+    空体、HTML、纯文本 = WAF 形态，不是内容审查也不是 11140 风控。
+    """
+    try:
+        body = json.loads(detail)
+        return isinstance(body, dict) and ("code" in body or "msg" in body)
+    except Exception:
+        return False
+
 
 def reset_restriction_state():
     """清空连坐保护状态（测试，以及人工确认「已申诉、可以恢复派发」时用）。"""
@@ -13665,6 +14222,16 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
         raise RateLimited(None, "upstream account restriction in effect",
                           wait=int(hold) + 1,
                           message=restriction_hold_message(realm, hold))
+    # 跨账号 fail-fast 闸门（rotateguard 移植）：WAF/模型不存在闸门合上后
+    # 直接快速失败，一个上游请求都不发——继续打只会把 IP 级拦截放大。
+    if WAF_GATE.active():
+        raise RateLimited(None, "upstream WAF block active on this egress IP",
+                          wait=max(1, int(WAF_GATE.remaining())),
+                          message=WAF_GATE.message())
+    if MODEL_BLOCK_GATE.active(model):
+        raise RateLimited(None, "model '%s' rejected by upstream" % model,
+                          wait=max(1, int(MODEL_BLOCK_GATE.remaining(model))),
+                          message=MODEL_BLOCK_GATE.message(model))
     # 复用调用方已建好的 body：/v1/chat/completions 在进这里之前已经 build 过
     # 一次（那次的产物只用于一行日志和 prompt_fingerprint），此前这里会为同一
     # 个 payload 再建一遍，大请求实测白付 ~13.6ms/请求。403 降级重试时仍按
@@ -13959,6 +14526,28 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
                         break
                     restricted_rotations += 1
                     continue
+                # 上游 WAF 403（空体/HTML/纯文本，无业务信封）不是内容审查，
+                # 降级提示词救不了。记一次 WAF 事件并冷却该账号；短窗内第二个
+                # 不同账号也撞上时闸门合上，本请求立即失败、之后所有请求
+                # fail-fast——换号猛打只会把一次 IP 级拦截放大成 N 倍请求量
+                # （workbuddy2api internal/rotateguard 移植）。
+                if not _has_business_envelope(detail):
+                    if WAF_GATE.note_waf(account.uid):
+                        raise RateLimited(
+                            None, "upstream WAF block active on this egress IP",
+                            wait=max(1, int(WAF_GATE.remaining())),
+                            message=WAF_GATE.message())
+                    account.note_error("HTTP 403 (waf)",
+                                       cooldown=WAF_ACCOUNT_COOLDOWN,
+                                       single_account=(total <= 1))
+                    log("account %s hit upstream WAF 403 (no business "
+                        "envelope), cooling %.0fs"
+                        % (account.uid[:8], WAF_ACCOUNT_COOLDOWN),
+                        tag="waf-gate")
+                    if session_key and POOL:
+                        POOL.affinity.demote(session_key, account.uid)
+                    last_error = exc
+                    continue
                 # Panel degrade.go: a content rejection in passthrough/append
                 # mode is usually a system-prompt fingerprint false positive.
                 # Switch to the minimal neutral prompt until next 00:00 CST
@@ -14039,6 +14628,9 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
                     POOL.affinity.demote(session_key, account.uid)
                 last_error = exc
                 continue
+            # 其余 4xx（含 11102「模型不存在」）：把账号钉到异常上再抛出，
+            # 错误上报与 model-block 闸门都要知道是哪个号被拒的。
+            exc.account_uid = account.uid
             raise
         except Exception as exc:
             if wb_accounts.is_tls_verify_error(exc):
@@ -17177,6 +17769,13 @@ class Handler(BaseHTTPRequestHandler):
         except (OSError, http.client.HTTPException) as read_exc:
             # Keep the original HTTP rejection even if its body is interrupted.
             detail = "upstream error body unavailable (%s)" % type(read_exc).__name__
+        # 11102 = 上游「模型不存在」：给 model-block 闸门记一次。闸门在短窗内
+        # 集齐两个不同账号的报告后合上，后续请求在 open_upstream 入口
+        # fail-fast——单个账号报 11102 只是该号没有这个模型（(账号,模型) 负缓存
+        # 处理），两个不同号接连报才是模型名本身坏了（rotateguard 移植）。
+        if "11102" in detail:
+            MODEL_BLOCK_GATE.note_blocked(
+                model, getattr(exc, "account_uid", None))
         error = wb_upstream_errors.classify_workbuddy_error(
             exc.code, detail, model=model)
         # Unknown errors retain the old bounded textual envelope. A confirmed
@@ -17453,6 +18052,10 @@ class Handler(BaseHTTPRequestHandler):
             return True
         if path.startswith("/agents"):
             return True
+        if path.startswith("/zen"):
+            return True
+        if path.startswith("/routing"):
+            return True
         return False
     def _strip_pinned_prefix_only(self):
         """Strip /u/<ref> from self.path; returns False for a malformed ref."""
@@ -17604,6 +18207,14 @@ class Handler(BaseHTTPRequestHandler):
             # 看板启动时用这个廉价判定决定要不要显示入口：不 import
             # wb_agents、不做任何探测（issue #246）。
             return self._json(200, {"enabled": self._agents_client_allowed()})
+        if path == "/zen/status":
+            if not self._panel_ok():
+                return self._error(401, "panel password required", "invalid_request_error")
+            return self._json(200, wb_zen.status())
+        if path == "/routing":
+            if not self._panel_ok():
+                return self._error(401, "panel password required", "invalid_request_error")
+            return self._json(200, routing_status(full=query.get("all") == ["1"]))
         return self._error(404, "not found", "invalid_request_error")
     def _get_dashboard(self):
         return self._dashboard()
@@ -17718,11 +18329,54 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             pass
         data = [model_entry(mid, meta) for mid, meta in entries] + provider_models
+        # 路由总池子：route/* 控制模型排最前，池公开 id（模型名 · 网关）排最后，
+        # 客户端（Trae / Cline 的模型选择器）能直接按供应商挑。
+        data = routing_model_entries() + data
+        try:
+            pool_entries = []
+            for public, meta in fetch_pool_models(realm=req_realm):
+                pool_entries.append({
+                    "id": public,
+                    "object": "model",
+                    "created": int(time.time()),
+                    "owned_by": str((meta or {}).get("pool_provider") or "pool"),
+                    "name": public,
+                    "pool_provider": (meta or {}).get("pool_provider"),
+                    "pool_realm": (meta or {}).get("pool_realm"),
+                    "pool_model": (meta or {}).get("pool_model"),
+                    "pool_label": (meta or {}).get("pool_label"),
+                })
+            data = data + pool_entries
+        except Exception:
+            pass
         pinned = pinned_account()
         if pinned is not None:
             # 定址路由宣告的是「这个账号实际能接的模型」：该账号禁用的模型
             # 不出现在清单里，客户端按账号拆 provider 时才不会选到必失败的项。
             data = [m for m in data if not pinned.model_disabled(m.get("id"))]
+        if not only_trae:
+            # 免费上游（OpenCode Zen / Kilo）的模型也列出来，按来源带前缀选中：
+            # zen 车道用 zen/<id>，Kilo 免费池用 kilo/<id>（两种前缀都只是选路
+            # 提示，实际来源由 wb_zen.resolve 判定）。它们不走账号池、不耗积分，
+            # 混进裸模型名会让客户端以为能直接调。
+            try:
+                _egg_cooldowns = wb_zen.cooldowns()
+                data = data + [
+                    {"id": egg_prefix_for(str(m.get("id")), str(m.get("source") or ""))
+                            + str(m.get("id")),
+                     "object": "model", "owned_by": str(m.get("source") or "zen"),
+                     "name": m.get("name") or str(m.get("id")),
+                     "context_window": m.get("context"),
+                     "max_output_tokens": m.get("output"),
+                     "source": m.get("sourceLabel") or "OpenCode Zen",
+                     "input": ["text", "image"] if m.get("vision") else ["text"],
+                     "supports_tools": bool(m.get("tools")),
+                     "supports_reasoning": bool(m.get("reasoning")),
+                     "egg_cooldown_left": _egg_cooldowns.get(str(m.get("id")))}
+                    for m in wb_zen.static_catalog()
+                ]
+            except Exception:
+                pass
         payload = {"object": "list", "data": data,
                    "realm": req_realm or CURRENT_REALM}
         # 来源说明（面板展示用）：这批清单是上游 API 实时取的，还是读的
@@ -19570,6 +20224,38 @@ class Handler(BaseHTTPRequestHandler):
         realm = str((payload or {}).get("realm") or "").strip().lower()
         return self._json(200, refresh_catalog(realm))
 
+    def _route_zen_refresh(self, payload):
+        """面板「刷新免费车道目录」：强制向 Zen / Kilo 两个免费源各拉一次。
+
+        拉取要 40 秒上下（Kilo 目录大），同步等会拖死面板请求，所以丢到
+        后台线程（wb_zen.refresh 内部按 _refresh_lock 排队，不会放大成
+        多倍上游请求），先回当前状态；前端轮询 /zen/status 看结果。
+        """
+        def run():
+            try:
+                wb_zen.configure(ACCOUNTS_DIR, log)
+                wb_zen.refresh(force=True)
+            except Exception as exc:
+                log("zen refresh failed: %s" % exc)
+        threading.Thread(target=run, name="egg-catalog-manual", daemon=True).start()
+        return self._json(200, {"ok": True, "refreshing": True,
+                                "status": wb_zen.status()})
+
+    def _route_routing_config(self, payload):
+        """面板改路由策略：非法值回 400，其余键忽略。"""
+        strategy = str(payload.get("strategy") or "").strip().lower()
+        if strategy not in wb_settings.ROUTING_STRATEGIES:
+            return self._error(400, "strategy must be one of %s"
+                               % ", ".join(wb_settings.ROUTING_STRATEGIES),
+                               "invalid_request_error")
+        config = wb_settings.set_routing_config(ACCOUNTS_DIR,
+                                                {"strategy": strategy})
+        try:
+            log("routing: strategy -> %s" % strategy, tag="routing", level="INFO")
+        except Exception:
+            pass
+        return self._json(200, {"ok": True, "config": config})
+
     def _route_logs_clear(self, payload):
         clear_logs()
         return self._json(200, {"ok": True})
@@ -20512,6 +21198,23 @@ class Handler(BaseHTTPRequestHandler):
             if payload is None:
                 return
             return self._route_catalog_refresh(payload)
+        if path == "/zen/refresh":
+            # 面板手动刷新免费车道目录：拉取要 40 秒上下，丢到后台线程跑，
+            # 先回当前状态；前端轮询 /zen/status 看刷新结果。
+            if not self._panel_ok():
+                return self._error(401, "panel password required", "invalid_request_error")
+            payload = self._payload_or_error()
+            if payload is None:
+                return
+            return self._route_zen_refresh(payload)
+        if path == "/routing/config":
+            # 面板改路由策略：策略必须是白名单里的五个之一，其余键忽略。
+            if not self._panel_ok():
+                return self._error(401, "panel password required", "invalid_request_error")
+            payload = self._payload_or_error()
+            if payload is None:
+                return
+            return self._route_routing_config(payload)
         if path == "/quota-scan/run":
             if not self._panel_ok():
                 return self._error(401, "panel password required", "invalid_request_error")
@@ -20645,6 +21348,36 @@ class Handler(BaseHTTPRequestHandler):
                     pass
                 return self._error(400, background_request_message(reason),
                                    "invalid_request_error")
+        # 路由总池子：route/* 是控制模型，按策略挑一个池子成员后改写
+        # payload["model"] 再走下面的常规车道；池公开 id（模型名 · 网关）
+        # 拆回基础 id 同样改写。改完的模型名要么带 zen-/kilo-/trae- 前缀
+        # 落进对应分支，要么是裸 id 走 WorkBuddy 车道。
+        if routing_strategy_of(payload.get("model")):
+            route = resolve_routing_model(routing_strategy_of(payload.get("model")),
+                                          self.headers, payload)
+            if not route:
+                return self._error(503, "routing pool is empty: no usable model candidates",
+                                   "routing_unavailable")
+            record_routing_decision(payload.get("model"), route)
+            try:
+                log("routing: %s -> %s (%s, %s)" % (payload.get("model"),
+                    route["public"], route["reason"], route["provider"]),
+                    level="INFO")
+            except Exception:
+                pass
+            payload["model"] = route["model"]
+        else:
+            pool = split_pool_model(payload.get("model"))
+            if pool:
+                payload["model"] = pool["model"]
+        if str(payload.get("model") or "").startswith(("zen/", "kilo/")):
+            if pinned_account() is not None:
+                return self._error(403, "this key or pinned route is restricted to WorkBuddy",
+                                   "invalid_request_error")
+            blocked = self._banned_model_error(payload["model"]) or self._key_model_error(payload["model"])
+            if blocked:
+                return self._error(403, blocked, "invalid_request_error")
+            return self._zen_chat(payload)
         if str(payload.get("model") or "").startswith("trae/"):
             if pinned_account() is not None or self._key_realm():
                 return self._error(403, "this key or pinned route is restricted to WorkBuddy", "invalid_request_error")
@@ -20739,6 +21472,59 @@ class Handler(BaseHTTPRequestHandler):
                     upstream, model, fp, account, t_start, effort=effort)
             return self._chat_nonstream_response(
                 upstream, model, fp, account, t_start, effort=effort)
+
+    def _zen_chat(self, payload):
+        """免费上游（OpenCode Zen / Kilo）：免凭据、不走账号池、不耗积分。
+
+        失败只回给调用方：这里没有账号可冷却，不能让一次免费车道抖动影响
+        付费池的调度状态。
+        """
+        model = str(payload.get("model") or "")
+        t_start = time.time()
+        upstream_payload = payload
+        bare_model = model
+        # 两种前缀（zen/ 与 kilo/）都只是本网关的选路提示；目录键是裸模型名
+        # （deepseek-v4.1-flash-free / kilo-auto/free）。真正的来源由
+        # wb_zen.resolve() 按目录与命名规则判定，前缀与来源不一致也不报错
+        # （例如 zen/kilo-auto/free 同样会路由到 Kilo 免费池）。
+        for prefix in ("zen/", "kilo/"):
+            if model.startswith(prefix):
+                upstream_payload = dict(payload)
+                upstream_payload["model"] = model[len(prefix):]
+                bare_model = model[len(prefix):]
+                break
+        # 本地冷却（A2）：同一模型刚被上游 429/400 拒绝时不再打必然失败的源，
+        # 直接回冷却响应。冷却只挡鸡蛋免费车道，不碰付费池。
+        cooldown = wb_zen.cooldown_hit(bare_model)
+        if cooldown is not None:
+            remaining = cooldown
+            record_error(model, 429, "free lane cooling (%ds left)" % remaining,
+                         key=self._key_id())
+            return self._error(429, "免费模型 %s 正在冷却（%d 秒后重试）。"
+                                    "换个免费模型，或稍后再试。" % (model, remaining),
+                               "rate_limit_error")
+        try:
+            wb_zen.configure(ACCOUNTS_DIR, log)
+            upstream, meta = wb_zen.open_stream(upstream_payload, session_key="")
+        except wb_zen.EggError as exc:
+            status = getattr(exc, "status", 502) or 502
+            if status in (429, 400):
+                # 上游额度用尽 / 模型不可用：给该模型一个短冷却，别让每个请求
+                # 都去打一次必然失败的源（冷却窗口见 wb_zen.COOLDOWN_SECONDS）。
+                wb_zen.cooldown_start(bare_model, status, str(exc)[:120])
+            record_error(model, status, str(exc)[:200], key=self._key_id())
+            return self._error(status, str(exc)[:400], "invalid_request_error")
+        except Exception as exc:
+            record_error(model, 502, str(exc)[:200], key=self._key_id())
+            return self._error(502, "free upstream unreachable: %s" % exc)
+        source = "zen"
+        if isinstance(meta, dict):
+            source = str(meta.get("source") or meta.get("provider") or "zen")
+        stub = _ZenAccount("free-" + source)
+        with upstream:
+            if payload.get("stream"):
+                return self._chat_stream_response(upstream, model, {}, stub, t_start)
+            return self._chat_nonstream_response(upstream, model, {}, stub, t_start)
 
     def _chat_stream_response(self, upstream, model, fp, account, t_start, effort=None):
             self.send_response(200)
@@ -21248,6 +22034,18 @@ def _serve_forever(args):
         _key_state = "off"
     log(f"listening  : http://{args.host}:{args.port}/v1  (api key: {_key_state})")
     log(f"dashboard  : http://{args.host}:{args.port}/")
+    # 免费车道目录：启动后异步刷一次真实目录。ensure 本身不阻塞 —— 冷启动
+    # 先交静态兜底清单，真实目录在后台线程里慢慢拉（面板 /zen/status 可见）。
+    try:
+        def _egg_boot_warm():
+            try:
+                wb_zen.ensure(ACCOUNTS_DIR)
+            except Exception as exc:
+                log("zen catalog boot warm failed: %s" % exc)
+        threading.Thread(target=_egg_boot_warm, name="egg-catalog-boot",
+                         daemon=True).start()
+    except Exception:
+        pass
     # Keep the handler referenced for the process lifetime: SetConsoleCtrlHandler
     # stores a raw pointer, so a collected callback would crash on close.
     _ctrl_handler = install_console_close_handler()

@@ -2236,3 +2236,121 @@ class PanelSessions(object):
     def revoke_all(self):
         with self._lock:
             self._tokens.clear()
+
+
+# ------------------------------------------------------------------ 路由
+# 「路由」页的策略。池子里的模型作为一个整体暴露成 route/* 控制模型，
+# 网关按这个策略挑一个成员再转发（参考 magpie 的路由组）。
+ROUTING_KEY = "routing"
+ROUTING_STRATEGIES = ("smart", "order", "rotate", "usage", "pace")
+ROUTING_DEFAULT_STRATEGY = "smart"
+DISABLED_MODELS_KEY = "disabled_models"
+
+
+def routing_config(accounts_dir):
+    """路由策略配置（缺省 smart）。"""
+    raw = load(accounts_dir).get(ROUTING_KEY)
+    if not isinstance(raw, dict):
+        raw = {}
+    strategy = str(raw.get("strategy") or ROUTING_DEFAULT_STRATEGY).strip().lower()
+    if strategy not in ROUTING_STRATEGIES:
+        strategy = ROUTING_DEFAULT_STRATEGY
+    return {"strategy": strategy}
+
+
+def set_routing_config(accounts_dir, patch):
+    """改路由策略；未知键原样保留，返回改完后的配置。"""
+    data = load(accounts_dir)
+    current = data.get(ROUTING_KEY)
+    if not isinstance(current, dict):
+        current = {}
+    merged = dict(current)
+    patch = patch or {}
+    if "strategy" in patch:
+        strategy = str(patch.get("strategy") or "").strip().lower()
+        if strategy not in ROUTING_STRATEGIES:
+            strategy = ROUTING_DEFAULT_STRATEGY
+        merged["strategy"] = strategy
+    data[ROUTING_KEY] = merged
+    save(accounts_dir, data)
+    return routing_config(accounts_dir)
+
+
+def _disabled_models_scope(provider, realm):
+    provider = str(provider or "").strip().lower() or "workbuddy"
+    if provider == "egg":
+        return "egg:"
+    realm = str(realm or "").strip().lower()
+    if realm not in ("intl", "cn"):
+        realm = ""
+    return "%s:%s" % (provider, realm)
+
+
+def _clean_disabled_table(raw):
+    table = {}
+    if not isinstance(raw, dict):
+        return table
+    for scope, ids in raw.items():
+        scope = str(scope or "").strip().lower()
+        if not scope:
+            continue
+        values = ids if isinstance(ids, (list, tuple, set)) else []
+        clean = []
+        for item in values:
+            mid = str(item or "").strip()
+            if mid and mid not in clean:
+                clean.append(mid)
+        if clean:
+            table[scope] = clean
+    return table
+
+
+def disabled_models(accounts_dir, provider=None, realm=None):
+    """停用的模型 id。
+
+    不给 provider 时返回整张表 {scope: [id, ...]}（面板导出 / 调试用），
+    给了就只返回该作用域的列表。
+    """
+    table = _clean_disabled_table(load(accounts_dir).get(DISABLED_MODELS_KEY))
+    if provider is None:
+        return table
+    return list(table.get(_disabled_models_scope(provider, realm)) or [])
+
+
+def is_model_disabled(accounts_dir, model, provider=None, realm=None):
+    """这个模型是否已被面板停用（按提供商 + 版本判断）。"""
+    mid = str(model or "").strip()
+    if not mid:
+        return False
+    return mid in disabled_models(accounts_dir, provider, realm)
+
+
+def set_model_disabled(accounts_dir, model, disabled, provider=None, realm=None):
+    """开 / 关一个模型，返回该作用域停用后的完整 id 列表。
+
+    写的是 settings.json 的 disabled_models 一张表；关掉最后一个模型时把空
+    作用域删掉，免得文件里留一堆 "xx:[]"。
+    """
+    mid = str(model or "").strip()
+    if not mid:
+        raise ValueError("model is required")
+    scope = _disabled_models_scope(provider, realm)
+    with _lock:
+        data = load(accounts_dir)
+        table = _clean_disabled_table(data.get(DISABLED_MODELS_KEY))
+        ids = list(table.get(scope) or [])
+        if disabled:
+            if mid not in ids:
+                ids.append(mid)
+        else:
+            ids = [item for item in ids if item != mid]
+        if ids:
+            table[scope] = ids
+        else:
+            table.pop(scope, None)
+        if table:
+            data[DISABLED_MODELS_KEY] = table
+        else:
+            data.pop(DISABLED_MODELS_KEY, None)
+        save(accounts_dir, data)
+    return ids

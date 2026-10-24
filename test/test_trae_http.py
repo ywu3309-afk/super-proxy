@@ -234,7 +234,11 @@ class HTTPTests(unittest.TestCase):
              patch.object(wb_proxy.wb_modelsdev, "refresh_async"):
             status, _, text = self.request("GET", "/v1/models", headers={"Authorization": "Bearer fixture-key"})
             self.assertEqual(status, 200)
-            self.assertEqual(json.loads(text)["data"], [])
+            # 免费上游（zen/）的模型是静态目录，永远在；这里只断言账号池那两类
+            # 没有因为 TRAE 缓存损坏而被带出来。
+            owners = {m.get("owned_by") for m in json.loads(text)["data"]}
+            self.assertNotIn("workbuddy", owners)
+            self.assertNotIn("trae", owners)
             status, _, text = self.request("GET", "/v1/models?provider=trae", headers={"Authorization": "Bearer fixture-key"})
             self.assertEqual(status, 503)
             self.assertNotIn("fixture corrupt store", text)

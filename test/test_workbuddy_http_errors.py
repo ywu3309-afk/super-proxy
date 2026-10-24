@@ -265,6 +265,8 @@ class WorkBuddyUpstreamAttributionTests(unittest.TestCase):
             "wb_settings": types.SimpleNamespace(egress_backoff_enabled=lambda directory: False),
             "wb_accounts": types.SimpleNamespace(get_realm_config=lambda realm: {}, urlopen=transport),
             "urllib": urllib, "time": time,
+            "WAF_GATE": types.SimpleNamespace(active=Mock(return_value=False)),
+            "MODEL_BLOCK_GATE": types.SimpleNamespace(active=Mock(return_value=False)),
         }
         exec(compile(ast.Module(body=[method], type_ignores=[]), "<fixture-open-upstream>", "exec"), namespace)
         payload = {"model": MODEL, "messages": [{"role": "user", "content": "fixture hello"}]}

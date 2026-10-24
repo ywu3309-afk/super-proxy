@@ -3,6 +3,7 @@ import base64
 import hashlib
 import json
 import os
+import random
 import ssl
 import sys
 import threading
@@ -2994,6 +2995,11 @@ class AccountPool(object):
         self._page_cursors = {}
         # uid 排序表的缓存：池成员没变就直接复用，变了重建（见 _page_ranks）。
         self._page_order_cache = None
+        # 三因子加权选号（pick.go 移植）的运行时状态：单调接单序号与每号
+        # 最近接单时间。纯内存，重启即归零（与 ref 一致，不落盘）。
+        self._three_factor_seq = 0
+        self._three_factor_used_seq = {}
+        self._three_factor_last_pick = {}
         self.affinity = SessionAffinity()
 
     def load(self):
@@ -3497,6 +3503,13 @@ class AccountPool(object):
         account = self._pick_weighted_first(snapshot, exclude, model)
         if account is not None:
             return account
+        # 三因子加权选号（workbuddy2api internal/pool/pick.go 移植）：余额、
+        # 临期积分、闲置时间三个因子打分，取前 5 加权抽签；100ms 内重复接单
+        # 防护（minPickGap）兕底到全候选 LRU。只在池里有余额数据时激活——
+        # 没有 credits 的账号（单测/纯凭据）走回原有偏好与轮询，行为不变。
+        account = self._pick_three_factor(snapshot, exclude, model)
+        if account is not None:
+            return account
         account = self._pick_expiring_first(snapshot, exclude, model)
         if account is not None:
             return account
@@ -3530,6 +3543,105 @@ class AccountPool(object):
         if not ready:
             return None
         return self._smooth_weighted_pick(ready, "_manual_weights")
+
+    # 三因子加权选号（workbuddy2api internal/pool/pick.go:204-233,524-561）：
+    #   weight = 1.0
+    #          + credits/maxCredits * 10          （余额因子：钱多的号多出）
+    #          + creditsExpiring/credits * 8      （临期因子：快过期的先花）
+    #          + idleWeight                       （闲置因子：越久没接单越优先）
+    #   idleWeight = min(距上次接单小时 * 0.5, 5.0)，从未接过单 = 满分 5.0。
+    #   按权重降序截断前 5，再筛掉距上次接单不足 minPickGap(100ms) 的，
+    #   对幸存者做定点加权抽签（权重四舍五入、保底 1，避免低权重号被饿死）；
+    #   幸存者为空则退化为全候选 LRU——按单调序号 usedSeq 选最久未用的，
+    #   不能用墙钟：Windows 时钟精度 0.5ms，并发连发时时间全相等会恒选第一个。
+    #   只在池里存在余额数据时激活（无 credits 时 None，回落原有偏好/轮询）。
+    THREE_FACTOR_MIN_PICK_GAP = 0.1
+    THREE_FACTOR_IDLE_PER_HOUR = 0.5
+    THREE_FACTOR_IDLE_MAX = 5.0
+    THREE_FACTOR_CREDIT_W = 10.0
+    THREE_FACTOR_EXPIRING_W = 8.0
+
+    def _expiring_remain(self, account):
+        """临期窗口内、还没过期的积分包余额合计（窗口 0 恒为 0）。"""
+        try:
+            window = int(getattr(account, "expiring_window_days", 0) or 0)
+        except (TypeError, ValueError):
+            return 0.0
+        if window <= 0:
+            return 0.0
+        total = 0.0
+        for pkg in ((account.credits or {}).get("packages") or []):
+            if pkg.get("no_expiry") or pkg.get("is_expired"):
+                continue
+            days, remain = pkg.get("days_left"), pkg.get("remain")
+            if days is None or remain is None:
+                continue
+            try:
+                if 0 < float(days) <= window and float(remain) > 0:
+                    total += float(remain)
+            except (TypeError, ValueError):
+                continue
+        return total
+
+    def _pick_three_factor(self, snapshot, exclude, model):
+        if not any(getattr(a, "credits", None) for a in snapshot):
+            return None
+        cands = [a for a in snapshot
+                 if a.uid not in exclude and a.ready(model=model)]
+        if not cands:
+            return None
+        now = time.time()
+        with self._lock:
+            self._three_factor_seq += 1
+            seq = self._three_factor_seq
+            used_seq = dict(self._three_factor_used_seq)
+            last_pick = dict(self._three_factor_last_pick)
+            max_credits = max(
+                (float((a.credits or {}).get("remain") or 0) for a in cands),
+                default=0.0)
+
+            def _weight(account):
+                credits = account.credits or {}
+                remain = float(credits.get("remain") or 0)
+                credit_w = (remain / max_credits
+                            * self.THREE_FACTOR_CREDIT_W) if max_credits > 0 else 0.0
+                expiring_w = (self._expiring_remain(account) / remain
+                              * self.THREE_FACTOR_EXPIRING_W) if remain > 0 else 0.0
+                last = last_pick.get(account.uid)
+                idle = (self.THREE_FACTOR_IDLE_MAX if last is None
+                        else min((now - last) / 3600.0
+                                 * self.THREE_FACTOR_IDLE_PER_HOUR,
+                                 self.THREE_FACTOR_IDLE_MAX))
+                return 1.0 + credit_w + expiring_w + idle
+
+            ranked = sorted(cands, key=_weight, reverse=True)
+            top5 = ranked[:5]
+            eligible = [a for a in top5
+                        if last_pick.get(a.uid) is None
+                        or now - last_pick.get(a.uid)
+                        >= self.THREE_FACTOR_MIN_PICK_GAP]
+            if not eligible:
+                # LRU 兕底：全候选里 usedSeq 最小的（平手按 uid 稳定排序）。
+                chosen = min(cands,
+                             key=lambda a: (used_seq.get(a.uid, 0), a.uid))
+            else:
+                total = 0
+                scaled = []
+                for a in eligible:
+                    sw = max(1, int(round(_weight(a) * 1000000)))
+                    total += sw
+                    scaled.append((a, sw))
+                r = random.SystemRandom().randint(0, total - 1) if total > 0 else 0
+                acc = 0
+                chosen = scaled[0][0]
+                for a, sw in scaled:
+                    acc += sw
+                    if r < acc:
+                        chosen = a
+                        break
+            self._three_factor_last_pick[chosen.uid] = now
+            self._three_factor_used_seq[chosen.uid] = seq
+        return chosen
 
     def _pick_expiring_first(self, snapshot, exclude, model):
         """Serve the in-window accounts first, or None when none can.

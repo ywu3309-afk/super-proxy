@@ -541,6 +541,71 @@ _log = lambda msg: None
 _loaded = False
 _status_cache = None
 
+#: 免费模型被上游 429（额度用尽/限流）或 400（Model unavailable）拒绝后的
+#: 本地冷却窗口。免费车道没有账号可轮换，重复打一个必然失败的源只会放大
+#: 上游的滥用计数；窗口内直接回本地 429，不碰上游。
+COOLDOWN_SECONDS = 60
+
+_cooldowns = {}
+_cooldowns_lock = threading.Lock()
+
+
+def _prune_cooldowns(now=None):
+    now = now if now is not None else time.time()
+    expired = [mid for mid, entry in _cooldowns.items()
+               if entry.get("until", 0) <= now]
+    for mid in expired:
+        _cooldowns.pop(mid, None)
+    return len(_cooldowns)
+
+
+def cooldown_start(model_id, status, detail=""):
+    """标记一个免费模型进入冷却（上游 429/400 后调用）。"""
+    mid = str(model_id or "").strip()
+    if not mid:
+        return
+    with _cooldowns_lock:
+        _cooldowns[mid] = {
+            "until": time.time() + COOLDOWN_SECONDS,
+            "status": int(status or 0),
+            "detail": str(detail or "")[:200],
+            "at": time.time(),
+        }
+        _prune_cooldowns()
+
+
+def cooldown_hit(model_id):
+    """模型在冷却中 → 返回剩余秒数；不在 → None。"""
+    mid = str(model_id or "").strip()
+    if not mid:
+        return None
+    now = time.time()
+    with _cooldowns_lock:
+        _prune_cooldowns(now)
+        entry = _cooldowns.get(mid)
+        if entry is None:
+            return None
+        remaining = int(entry.get("until", 0) - now)
+        return remaining if remaining > 0 else None
+
+
+def cooldown_clear(model_id=None):
+    """清掉一个或全部冷却标记（面板手动解锁用）。"""
+    with _cooldowns_lock:
+        if model_id:
+            _cooldowns.pop(str(model_id), None)
+        else:
+            _cooldowns.clear()
+
+
+def cooldowns():
+    """冷却快照：{模型 id: 剩余秒数}（供 /v1/models 与 /zen/status 展示）。"""
+    now = time.time()
+    with _cooldowns_lock:
+        _prune_cooldowns(now)
+        return {mid: int(entry.get("until", 0) - now)
+                for mid, entry in _cooldowns.items()}
+
 
 def configure(directory, log=None):
     """设置运行期目录与日志函数；重复调用安全。"""
@@ -639,11 +704,23 @@ def _proxy_url():
         return ""
 
 
+def _open(req, timeout):
+    """走项目统一的出口（代理 + keep-alive 池）。
+
+    本仓库的 wb_accounts 只有 urlopen(req, timeout, proxy)；上游 wb-proxy 多一个
+    urlopen_with_fallback(…, log=…)。两个签名都在这里兼容，避免为了一个免费车道
+    去改账号模块。
+    """
+    import wb_accounts
+    opener = getattr(wb_accounts, "urlopen_with_fallback", None)
+    if opener is not None:
+        return opener(req, timeout=timeout, proxy=_proxy_url(), log=_log)
+    return wb_accounts.urlopen(req, timeout=timeout, proxy=_proxy_url())
+
+
 def _http_json(url, headers, timeout):
-    from wb_accounts import urlopen_with_fallback
     req = urllib.request.Request(url, headers=headers)
-    with urlopen_with_fallback(req, timeout=timeout, proxy=_proxy_url(),
-                               log=_log) as resp:
+    with _open(req, timeout) as resp:
         raw = resp.read(8 << 20)
     return json.loads(raw.decode("utf-8", "replace"))
 
@@ -918,6 +995,8 @@ def status():
         "note": snap["note"],
         "pools": pool_status(),
         "stale": bool(snap["at"] and time.time() - snap["at"] > CATALOG_TTL_SECONDS),
+        "cooldowns": cooldowns(),
+        "cooldown_seconds": COOLDOWN_SECONDS,
     }
 
 
@@ -1358,12 +1437,10 @@ def open_stream(payload, session_key="", timeout=600, pool_label=None):
     """打开一次免费上游流；返回 (EggUpstream, 元数据)。"""
     url, body, headers, rename, source, base, sse = build_request(
         payload, session_key, pool_label)
-    from wb_accounts import urlopen_with_fallback
     data = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     req = urllib.request.Request(url, data=data, method="POST", headers=headers)
     try:
-        resp = urlopen_with_fallback(req, timeout=timeout, proxy=_proxy_url(),
-                                     log=_log)
+        resp = _open(req, timeout)
     except urllib.error.HTTPError as exc:
         detail = ""
         try:
