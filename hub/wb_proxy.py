@@ -81,6 +81,7 @@ import wb_trae_http
 import wb_external
 import wb_external_http
 import wb_upstream_errors
+import wb_tokensaver
 IS_WINDOWS = os.name == "nt"
 
 # ---- 一键配置客户端（wb_agents）的可用性判定（issue #246）----
@@ -305,6 +306,25 @@ BACKGROUND_MODEL_NAMES = tuple(
     ).split(",")
     if m.strip()
 )
+
+
+def _apply_token_saver(payload):
+    """Compress prompt/tool output before it reaches the upstream (fail-open).
+
+    Only the model-facing copy is touched; the caller's request snapshot and the
+    tool validation path keep the original text. Any failure here must be
+    invisible to the request: a broken compressor is worse than a fat prompt.
+    """
+    if not isinstance(payload, dict):
+        return
+    try:
+        if wb_tokensaver.disabled_for_request():
+            return
+        messages = payload.get("messages")
+        if isinstance(messages, list):
+            payload["messages"] = wb_tokensaver.apply(messages, ACCOUNTS_DIR)
+    except Exception:
+        return
 
 
 def _apply_background_model_alias(payload):
@@ -17568,6 +17588,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {"slots": proxy_slots_view()})
         if path == "/logs":
             return self._get_logs(query)
+        if path == "/token-saver/stats":
+            if not self._panel_ok():
+                return self._error(
+                    401, "panel password required", "invalid_request_error"
+                )
+            return self._json(200, wb_tokensaver.stats(ACCOUNTS_DIR))
         if path == "/logs/export":
             return self._get_logs_export()
         if path == "/settings/reveal":
@@ -20562,6 +20588,7 @@ class Handler(BaseHTTPRequestHandler):
         if is_account_route:
             return self._handle_accounts(path, payload)
         _apply_background_model_alias(payload)
+        _apply_token_saver(payload)
         # Check per-key concurrency limit (#359)
         key_ok, cur_key_conc, max_key_conc = _acquire_key_slot(self.key_entry)
         if not key_ok:
