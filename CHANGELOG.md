@@ -1,5 +1,12 @@
 # 更新记录
 
+## 1.7.6（免费车道前缀改为 hang/）
+
+- 免费车道的公开前缀从 zen/（部分 kilo/）统一为 **hang/**，由 settings 的 ree_lane_prefix 控制，默认 hang；zen/、kilo/ 与裸模型名继续兼容。
+- 修：免费模型在 /v1/models 里被重复列了两遍、且 id 带「· 鸡蛋」后缀（hang/xxx · 鸡蛋）导致无法调用；现在统一成裸 hang/<id> 并按 id 去重，27 条免费模型恢复正常。
+- 实测：hang/kilo-auto/free、kilo-auto/free 均 200；deepseek-v4.1-flash 仍走 WorkBuddy 账号池。
+- 全套 254 条单测通过。
+
 ## 1.7.5（免费模型可省略 zen//kilo/ 前缀、设置页显示桌面更新进度）
 
 - 免费车道的 zen/ 与 kilo/ 只是来源标签，不再是调用约定：裸模型名（如 deepseek-v4.1-flash-free、kilo-auto/free）只要 wb_zen.resolve() 认得，就会进入同一条免费车道。实测：裸名 kilo-auto/free 返回 200（落到 dots-studio/dots-3-note-preview:free）；裸名 deepseek-v4.1-flash-free 也路由到 Zen（当前上游配额用尽，回 429）。
