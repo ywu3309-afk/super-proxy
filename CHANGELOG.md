@@ -1,5 +1,11 @@
 # 更新记录
 
+## 1.7.7（移除免费车道旧前缀与裸名）
+
+- 免费模型只接受统一前缀 hang/：zen/、kilo/ 与裸模型名全部停用，调用会收到一句明确提示（例如“免费模型的旧前缀已停用，请改用 hang/<模型名>”），不会再落到 WorkBuddy 通道报 11102。
+- 实测：hang/kilo-auto/free → 200；kilo-auto/free → 400 并提示加前缀；zen/deepseek-v4.1-flash-free → 400 并提示新前缀；deepseek-v4.1-flash 不受影响。
+- 全套 254 条单测通过。
+
 ## 1.7.6（免费车道前缀改为 hang/）
 
 - 免费车道的公开前缀从 zen/（部分 kilo/）统一为 **hang/**，由 settings 的 ree_lane_prefix 控制，默认 hang；zen/、kilo/ 与裸模型名继续兼容。
