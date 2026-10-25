@@ -1,5 +1,13 @@
 # 更新记录
 
+## 1.7.12（逐模型实测 TRAE 工具信封额度）
+
+- 用真实账号把 31 个 TRAE 模型逐个量了一遍（每个模型按 6 万→60 万字符逐级加压，带工具请求），额度写进 TraeProvider._TOOL_BUDGETS，留 5 千字符余量；未列模型默认 100000。
+- 结果分档：Doubao-Seed-Code / glm-5.3 / glm-5.3-flashx / qwen-3.5 / qwen-3.6-plus / qwen-3.7-plus 约 60 万；DeepSeek-V4-Flash / DeepSeek-V4-Pro-Official / Doubao-Seed-2.1-* 约 40 万；glm-5 / kimi-k2.5 / kimi-k2.6 / kimi-k3.1-pro 只有 2-3 万。
+- -trae 后缀的重名模型查额度时自动剥后缀，和同名模型共用一档。
+- 实测样本：Doubao-Seed-Code 55 万 → 200；deepseek-v4.1-flash-trae 12 万 → 200；glm-5 2 万边界不稳定（上游偶发 502）。
+- 254 条单测全过。
+
 ## 1.7.11（工具信封额度按模型可配）
 
 - 原生 	ools 字段经实测在所有模型 / 函数上都被上游 400 拒绝（chat_v3、solo_coder、裸 schema、Anthropic 形状都试过），确认只能走文本信封。
