@@ -1,5 +1,14 @@
 # 更新记录
 
+## 1.7.8（TRAE 直连 llm_raw_chat，去掉 trae/ 前缀）
+
+- TRAE 通道改为直连官方 POST /api/ide/v2/llm_raw_chat：用目录里的 config_name + model_name（优先 __max，其次 __dev）直发，不再依赖 Electron 原生桥；原 llm_utils_chat 保留兜底。
+- 关键修复：model_name 必须带 __dev/__max 后缀，直接拿 config_name 当模型名会得到上游 4023 model is unknown。
+- 模型命名：不再使用 	rae/ 前缀。与 WorkBuddy 不重名的 TRAE 模型直接用裸名（如 Doubao-Seed-Code、kimi-k3）；重名的 13 个加 -trae 后缀（如 deepseek-v4.1-flash-trae），裸名仍归 WorkBuddy，两条通道互不抢名。
+- 模型清单去掉 TRAE 池的重复条目（原先同名模型被列两遍，133 → 102 条）。
+- 实测：Doubao-Seed-Code / kimi-k3 / glm-5.3-flashx → 200（TRAE）；deepseek-v4.1-flash → 200（WorkBuddy）；deepseek-v4.1-flash-trae → 200（TRAE）；TRAE 四探针 4/4。
+- 已知限制：超过 6 万字符的请求仍按原生信封预算回 413（直连 raw 的 1M 上下文尚未放开）。
+
 ## 1.7.7（移除免费车道旧前缀与裸名）
 
 - 免费模型只接受统一前缀 hang/：zen/、kilo/ 与裸模型名全部停用，调用会收到一句明确提示（例如“免费模型的旧前缀已停用，请改用 hang/<模型名>”），不会再落到 WorkBuddy 通道报 11102。
