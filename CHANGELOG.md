@@ -1,5 +1,12 @@
 # 更新记录
 
+## 1.7.9（TRAE 长上下文放开到直连额度）
+
+- 直连 llm_raw_chat 的模型不再经过原生工具桥的 60000 字符信封预算：没有 tools/tool_choice/图片的普通长对话直接发上游，由上游的 prompt_max_tokens（__max 档约 936k）决定上限。
+- TRAE 目录刷新改为**直连优先**：先用 get_detail_param 拿 config_name/model_name，成功就不再让原生客户端目录覆盖；失败才回落原生/本地缓存。
+- 实测四探针 4/4：sys=210k 从 413 变为 200（1.6s），sys=3k/25k 均 200。
+- 远端目录失败只尝试一次，避免重复请求与回退路径被判失败；254 条单测全过。
+
 ## 1.7.8（TRAE 直连 llm_raw_chat，去掉 trae/ 前缀）
 
 - TRAE 通道改为直连官方 POST /api/ide/v2/llm_raw_chat：用目录里的 config_name + model_name（优先 __max，其次 __dev）直发，不再依赖 Electron 原生桥；原 llm_utils_chat 保留兜底。
