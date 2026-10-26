@@ -1,5 +1,16 @@
 # 更新记录
 
+## 1.8.0（账号凭据加密与自动续期）
+
+- 凭据落盘改为 DPAPI 加密：ccessToken / 
+efreshToken 以 dpapi: 信封写入，换机器或换 Windows 用户都解不开；旧明文文件继续可读，保存一次即自动迁移。
+- 新建的凭据文件收紧 ACL，只授予当前用户完全控制（icacls /inheritance:r）。
+- 新增 TokenKeeper 保活线程：每 30 分钟检查一次，access token 距到期不足 7 天时用 refresh token 主动换新，并轮换 refresh token，把 29 天的有效期持续续下去。
+- 新增接口：GET /accounts/keepalive 查看每个账号的到期时间、上次续期时间、是否有 refresh token；POST /accounts/keepalive/run 手动触发一次续期。
+- 账号面板字段新增 lastRefreshAt、utoRefresh。
+- 本机 15 个账号已全部迁移为加密存储，网关仍显示 15/15 可用。
+- 新增 6 条安全/保活单测，全套 260 条通过。
+
 ## 1.7.13（TRAE 拒绝请求时给出可执行提示）
 
 - 上游在上下文超限或内部拒绝时会返回非 SSE 文本，原来的报错是“TRAE SSE 数据不是有效 JSON”，对使用者没有可操作性。
