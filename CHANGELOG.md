@@ -1,5 +1,12 @@
 # 更新记录
 
+## 1.8.5（11128 按模型快速封禁，DSH 恢复可用）
+
+- 11128 的真实含义是 Illegal API invocation from an unapproved channel，与账号无关、与模型绑定：同一模型在每个账号上都会被拒。旧逻辑逐个账号换号重试，把一次拒绝放大成 15 次请求，最后仍失败。
+- 现在第一次命中就按模型封禁 10 分钟（ModelBlockGate.block_model），后续请求直接快速失败，不再空转。
+- 账号身分已统一回 workbuddy，并关闭 uto_switch_product（vscode / cli 会被上游判为未授权渠道）。
+- 实测：deepseek-v4.1-flash、deepseek-v4-pro 均 200；DSH headless 连续两次成功返回，日志无 11128。
+
 ## 1.8.4（修复 11128 渠道校验与工具指纹）
 
 - 证据确认：`11128` 的上游正文是 `Illegal API invocation from an unapproved channel`，不是余额不足，也不是单纯缺少会话 ID。
