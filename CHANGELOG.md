@@ -1,3 +1,7 @@
+## 1.8.8 (11128 request-shape diagnostics)
+
+- Keeps the 1.8.7 DSH identity/history sanitization and bounded retries; adds redacted request-shape diagnostics for remaining 11128 cases.
+
 # 更新记录
 
 ## 1.8.7（修复真实 11‑128 线格式与 DSH 历史指纹）
@@ -323,3 +327,4 @@ eceivedBytes / 	otalBytes / progress），不是前端估算；每 500ms 轮询�
 - 更新时保留账号、密钥、设置、用量与窗口偏好；保留旧程序并检查新版本启动。
 - 发布打包使用源码白名单，排除账号、运行日志、调试截图及上游参考 checkout。
 - 保留上游许可及归属说明。
+
