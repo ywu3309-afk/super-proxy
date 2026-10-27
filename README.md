@@ -145,11 +145,14 @@ compat:
 ```powershell
 npm run test:desktop-update
 python test/desktop_update_helper_test.py
+npm run check:installed     # 安装目录、桌面壳、运行中网关是否都跟源码一致
 npm version patch
 git push origin main --follow-tags
 npm run release:prepare
 npm run release:publish
 ```
+
+`check:installed` 按 `build/package.mjs` 的打包白名单逐文件比对 `hub/` 与 `<安装目录>\resources\hub\`，再读桌面壳 exe 的 `FileVersion` 和 `GET /health` 的 `version`；有任何一处不一致就以退出码 1 结束。它解决的问题是「改了 `hub/*.py` 却忘了拷进安装目录、或者忘了重启网关，于是本机验证的是旧代码」——这类问题从现象上看和代码写错一模一样。
 
 `npm version patch` 同步更新清单和锁文件并创建版本提交及标签；例如 v1.1.0 → v1.1.1。`release:prepare` 只向独立 `release/publish-vX.Y.Z/` 构建，不触碰当前程序和账号。`release:publish` 在私人仓库上传 ZIP、更新清单和校验和，校验附件成功后才公开该 Release 给仓库授权用户。
 
