@@ -1,3 +1,7 @@
+## 1.8.11（修复 DSH 指纹清洗执行顺序）
+
+- 修复首段身份句先被改写后，后续 DSH 固定指纹句未进入清洗快路径的问题；现在完整 19800 字符 system prompt 会继续执行句式改写。
+
 ## 1.8.10（清洗 DSH 工具指纹句）
 
 - 针对真实 DSH 19800 字符 system prompt，改写 `Tokens prefixed with @`、`Use the read/glob/grep/workflow tool` 等固定指纹句，保留操作含义但避免 WorkBuddy 渠道校验误判。
