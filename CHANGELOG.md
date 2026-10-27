@@ -1,3 +1,11 @@
+## 1.8.15（运行时版本自检与发版守卫）
+
+- `GET /health` 增加 `version` 字段：确认「这个端口上跑的是哪一版」只需一次请求，不必再比对 hub 文件哈希。桌面启动时会传 `WB_DESKTOP_VERSION`，裸跑 `python hub/wb_proxy.py` 时用 hub 里的兜底字面量。
+- 修正 hub 里 `server_version` 长期停在 `wb-proxy/1.7.16` 的漂移；新增 `test/test_version_sync.py`，把它与 `package.json`、`package-lock.json` 钉在一起，下次忘改会直接让单测变红。
+- 新增 `node scripts/check-installed.mjs`（`npm run check:installed`）：按 `build/package.mjs` 的打包白名单比对安装目录与源码、读桌面壳 exe 版本、读运行中网关自报版本，一条命令看出「改了代码忘了同步」漏在哪一步；运行时生成的文件（模型目录缓存、`__pycache__`、统计文件）不会误报。
+- `desktop/github.cjs` 的 HTTP 错误带上 GitHub 返回的 `message` / `errors`：422 不再只有一个状态码，失败原因直接可读。
+- `scripts/publish-release.mjs` 发布前按 tag 精确查一次已发布版本，收尾 PATCH 被拒时去掉 `make_latest` 重试，避免附件已全部上传却停在 draft。
+
 ## 1.8.14（新增本地网关接入教程）
 
 - 顶部新增「接入教程」页面，集中说明本地 Base URL、API Key、模型 ID 和客户端配置步骤。
