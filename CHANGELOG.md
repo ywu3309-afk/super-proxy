@@ -1,6 +1,7 @@
 ## 1.8.8 (11128 request-shape diagnostics)
 
 - Keeps the 1.8.7 DSH identity/history sanitization and bounded retries; adds redacted request-shape diagnostics for remaining 11128 cases.
+- Drops stateful Responses fields (`store`, `previous_response_id`, `conversation_id`) before WorkBuddy chat dispatch and handles hyphen/underscore DSH brand variants.
 
 # 更新记录
 
