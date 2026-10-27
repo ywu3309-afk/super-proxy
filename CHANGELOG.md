@@ -1,3 +1,8 @@
+## 1.8.9（清理有状态字段与更多 DSH 变体）
+
+- 清理 Chat Completions 转发中不属于 WorkBuddy chat 协议的 `store`、`previous_response_id`、`conversation_id` 字段，避免 Responses/Agent 状态字段触发渠道校验。
+- 补齐 `DeepSeek-Harness`、换行和制表符变体的出站清洗；不改路径、URL、文件名和工具名称。
+
 ## 1.8.8 (11128 request-shape diagnostics)
 
 - Keeps the 1.8.7 DSH identity/history sanitization and bounded retries; adds redacted request-shape diagnostics for remaining 11128 cases.
