@@ -56,3 +56,23 @@ __pycache__/
 accounts/
 usage/
 hub/catalog/*.json
+
+# 源码只留在本机。GitHub 上这个仓库只作为发布通道：README / CHANGELOG /
+# licenses / docs / assets，其余代码一个文件都不进去（历史也已重写清掉）。
+# 构建、跑测试、发版都照旧用本机这份工作区。
+/hub/
+/desktop/
+/build/
+/scripts/
+/test/
+/src/
+/web/
+/pricing/
+/server.mjs
+/package.json
+/package-lock.json
+/Dockerfile
+/docker-compose.yml
+/.dockerignore
+/config.example.json
+/.gitleaks.toml
