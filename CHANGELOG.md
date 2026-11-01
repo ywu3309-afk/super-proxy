@@ -1,3 +1,23 @@
+## 1.8.19（管理接口跨站防护与导出脱敏）
+
+**查出来的两个真问题**
+
+- 桌面壳启动时传 `WB_PANEL_NO_PASSWORD=1`，而所有管理接口都走 `_panel_ok()`。结果是 127.0.0.1 上**任何进程**无鉴权就能读 `/settings`、`/accounts`、`/logs`，还能 `POST /settings/save` 改配置、`POST /accounts/*` 动账号。
+- `GET /accounts/export` 更直接：无鉴权返回 15 个账号的 `accessToken`（1393 字符）和 `refreshToken`（700 字符）——完整凭据明文。存盘虽然用 DPAPI 加密，这个接口把它原样吐了出来。
+
+**改了什么**
+
+- 管理接口加同源检查：带外站 `Origin` 的请求一律 401（`/settings`、`/accounts/export`、写接口都实测过）。curl 与原生命令行客户端不带 `Origin`，照常可用；面板自己的同源请求不受影响。
+- 免密只覆盖「从没设过密码」：一旦设过面板密码，`WB_PANEL_NO_PASSWORD` 不再让密码失效（以前设了也等于没设）。
+- 免密 + 默认密码状态下，`/accounts/export` 不再导出 `accessToken` / `refreshToken`，显式传 `?secrets=1` 也不给。账号清单、额度、配置照常导出；要完整凭据导出，先设面板密码。
+
+**没改的两处（已确认）**
+
+- Electron 壳：`contextIsolation: true`、`sandbox: true`、`nodeIntegration: false`，是当前推荐配置。
+- `/v1/*` 的 `Access-Control-Allow-Origin: *`：浏览器里的 OpenAI 客户端要靠它，且这些接口仍要 API Key，保留。
+
+**顺带说明**：试过把 `data/` 目录 ACL 收紧到仅当前用户 + SYSTEM，在这台机器的 UAC 令牌与继承规则下会让运维工具读不了自己的 `settings.json`，已用 `icacls /reset /T` 回滚到继承状态。这条不做，留作可选。
+
 ## 1.8.18（设置页说明改成大白话）
 
 - 「设置」页 20 个开关与参数块的说明全部重写：先说「这是什么、打开会怎样」，再说要注意什么；术语第一次出现时给生活化解释（退避 = 先等一会儿再试、熔断 = 直接停一段时间、日桶 = 先按天记好的账、单元 = 一轮问答连同它的工具往返）。
