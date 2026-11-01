@@ -1,3 +1,12 @@
+## 1.8.20（回退 1.8.19 的两处限制）
+
+1.8.19 给管理接口加了同源检查、给导出加了脱敏。这台网关本来就是本机自用、桌面壳默认免密的场景，那两处限制换不来对应的收益，按操作者要求回退：
+
+- 管理接口恢复：`WB_PANEL_NO_PASSWORD=1` 时整体免密，不再检查 `Origin`。`_panel_ok()` 里留了一句注释，写明这是有意的默认而不是遗漏。
+- `/accounts/export` 恢复默认导出 `accessToken` / `refreshToken`（`?secrets=0` 仍可要求脱敏）。
+
+其余检查结论不变：网关只绑 `127.0.0.1`，Electron 壳 `contextIsolation` / `sandbox` / `nodeIntegration` 都是安全配置，账号落盘 DPAPI 加密，usage 日志不含 token。
+
 ## 1.8.19（管理接口跨站防护与导出脱敏）
 
 **查出来的两个真问题**
