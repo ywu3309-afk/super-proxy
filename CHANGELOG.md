@@ -1,3 +1,22 @@
+## 1.8.22（重试总预算 + 裁剪预算可调）
+
+**症状**：DSH 报 `pi-ai stream idle timeout after 300000ms`，重试 1/5、3/5 都失败。同期网关日志每 10–60 秒一条：
+
+```
+upstream connection hiccup for 'deepseek-v4.1-flash' (URLError: The write operation timed out)
+upstream connection hiccup for 'deepseek-v4.1-flash' (TimeoutError: The read operation timed out)
+```
+
+涉及 10 多个账号。usage.jsonl 里同一时段的请求 `prompt_tokens` 到 **545650**（54.5 万），请求体好几 MB。
+
+**根因**：写请求体受 `header_timeout_seconds`（120 秒）约束，而 `open_upstream` 的换号重试上限是「池子大小 +1」次。一个 54 万 token 的 body 每个账号都要重传一遍，几次就把客户端 300 秒的首字节预算耗光——客户端只看到一句「流空闲超时」，看不出网关其实在换号重试。
+
+**改了两处**
+
+1. **重试总预算**：`open_upstream` 加 deadline（`WB_RETRY_BUDGET_S`，默认 240 秒）。到点抛 `upstream retry budget exhausted after 240s (3 attempt(s) all failed)`，上层转 502。客户端立刻拿到一个可重试的错误，自己决定要不要再来一次，而不是在网关里干等。
+
+2. **裁剪预算进设置**：`fast_context_target` 落到 `settings.json`，面板「设置 → 快速上下文」直接填（8000–1000000，下一请求生效）。以前只能靠环境变量 `WB_FAST_CONTEXT_TARGET`，改一次得重启整个桌面程序。环境变量仍可覆盖。
+
 ## 1.8.21（按钮文案明确到 WorkBuddy）
 
 账号列表工具栏那个按钮原来叫「一键探测本地账号」，看不出探的是谁——它旁边就是「扫描 WorkDaddy 备份」，两个名字摆在一起很容易当成同一件事。它的 tooltip 和实际行为都是探测本机**已登录的 WorkBuddy 桌面客户端**（`POST /accounts/import/desktop`），所以文案改成「一键探测 WorkBuddy 账号」，中英文一起改。
