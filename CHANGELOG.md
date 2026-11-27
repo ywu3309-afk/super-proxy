@@ -1,3 +1,27 @@
+## 1.8.30（第三方通道可转发 + 面板补齐 + 四个洞）
+
+**症状**：第三方 OpenAI 兼容通道只有注册表，没有转发——`/v1/models` 里看不到 `ext/...`，客户端拿这个模型名直接 404。面板「第三方通道」页点任何按钮都报 `ReferenceError: loadThirdPartyChannels is not defined`，整页还是无样式裸列表。
+
+**原因**：
+1. 第三个供应商（自挂上游）只做到「存通道 + 探活」，`_dispatch_chat_post` 里没有 `ext/` 分支，候选池也没并入 external。
+2. 面板只写了 HTML 壳，10 个 JS 函数一个都没定义。
+3. CSS 选择器写成 `#pageThirdParty`，HTML id 是 `pageThirdparty`——CSS 大小写敏感，39 条规则全部不生效。
+
+**改动**：
+- 新增 `ext/<通道 id>/<模型>` 公开模型名：`fetch_pool_models` 追加 external 候选，`_routing_provider_ready` 认 `provider=external`，`_dispatch_chat_post` 在 zen 之后、trae 之前分流到 `_external_chat()`。外部通道独立计账，不进号池调度，失败不触发 WorkBuddy 的冷却与熔断。
+- 上游一律走 SSE（`open_stream` 强制 `stream=true`），客户端要非流式由网关聚合，避免同一通道维护两套代码；非流式回包保留客户端请求的 `ext/...` 模型名，不把 `remote_model` 回显出去。
+- **兜底不再盖过面板开关**：`find()` 的「未登记模型也认」原来无视模型级停用，`ext/<id>/<name>` 直接透传上游。现在兜底命中同名停用项返回 403，模型名按登记时同一套规则校验（禁 `/ \ \n \r`），垃圾名回 404。
+- **错误类型按 OpenAI 形状分类**：401/403→`authentication_error`、429→`rate_limit_error`、5xx→`api_error`、其余→`invalid_request_error`。此前一律 `invalid_request_error`，SDK 的重试与换 key 分支认不出来。
+- **`save_model` 不再冲掉 `remote_model`**：面板只发 `{model, enabled}` 时沿用旧的 `remote_model` 与能力位，否则改一次开关就把上游模型名变成模型本名。
+- 面板补齐整套行为：通道列表/统计/卡片、增删改、启停、探活、模型映射增删与单条开关、「探活并导入全部」。表单去掉后端不存在的「通道组/私用自挂」，换成真实的 `note` 与 `self_hosted_only`（勾了才允许指向 127.0.0.1/内网，Ollama、vLLM 这类自建服务靠它进得来）。
+- 面板契约新增 `POST /api/third-party-channels/{id}/delete` 与 `POST .../{id}/models`（`{models:[...]}` 整体替换 / `{model,enabled}` 单条 / `{model,delete:true}` 删除）；`replace_models()` 同名沿用旧 id 与 `created_at`，面板手里的引用不会因为一次整体保存而失效。
+
+**验证**：
+- 本地 mock 上游（127.0.0.1:18999）端到端：非流式 `echo<hello-nonstream>`、流式逐块、未登记模型兜底 200、未知模型 404、停用模型 403、上游 500→`api_error`、上游 401→`authentication_error`。
+- 面板 headless Chrome 实测：`pageActive=true`、2 张卡 8 条模型行、「探活」按钮回「探活成功，上游报告 2 个模型」、控制台无 JS 异常。
+- 回归：`/v1/models` 110 项且 `ext/*` 为 0（测试通道已清）、`deepseek-v4.1-flash` 200、`route/auto|smart|rotate` 全 200、号池 11 个可用 3 个未受影响。
+- `test_version_sync.py` 两条用例通过：`package.json` / `package-lock.json` / `hub` 的 `server_version` 三处同为 1.8.30。
+
 ## 1.8.29（令牌吊销可见化 + 滚动续期 + 小额请求不再烧推理）
 
 **症状**：号池一批账号同时显示"登录已过期"，但它们的 JWT 到期时间还有 25 天；同一批号在网关重启后又全部变回"可用"，每次请求白吃一个 401。另有标题生成这类 `max_tokens` 很小的请求，明明预算够用，回复却是空的。
