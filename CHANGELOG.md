@@ -1,3 +1,28 @@
+## 1.8.31（图片/视频端点 + 积分双窗口 + 两道请求守卫）
+
+**症状**：上游 config 里挂着一批 `text-to-image` / `text-to-video` 模型，但网关只有对话与语音两条车道——客户端在 `/v1/models` 里看不见它们，拿名字调 `POST /v1/images/generations` 得到 404。积分只有一个总数，分不清「月底才清零的基础额度」和「逐日到期的赠送包」，某个号明明还有 1300 分，却不知道其中多少过几天就作废。任务在后台跑的时候，客户端容易把付费模型当免费模型继续调，积分照烧。
+
+**原因**：
+1. 图片/视频模型在 config 的 `models` 数组里靠 `tags` 标车道，不在 `agents[].models` 的选择器列表里，`fetch_pool_models` 的候选池没读这层。
+2. 上游每个信用包带 `capacity_type`（4 = 计划基础额度、1 = 活动赠送包），网关只把 `remain` 汇总成一个数。
+3. 免费模型只有 `FREE_CAP_MODELS` 这个常量，没有任何请求级开关能把它们"锁成唯一可用"。
+
+**改动**：
+- **图片**：`POST /v1/images/generations`（`model`/`prompt`/`size`/`n`）→ 上游 `/v2/images/generations`，回 OpenAI `{created, data:[{url}]}`；`POST /v1/images/edits` 同时吃 JSON（`image`/`image_url`/`image_data`）与 OpenAI 的 multipart（把上传的图转 base64 塞 `image_data`）。
+- **视频**：`POST /v1/videos/generations` 起异步任务，回 `{id, status}`；`POST /v1/videos/tasks/{id}` 查状态。上游把 task 绑在创建它的账号上，换号查会回「Not authorized」，所以 task→账号归属**落盘**（`data/accounts/media_tasks.json`，最多 500 条），查不到记录时逐号试一遍并补记。
+- 媒体模型名单来自 config 的 `tags`（`text-to-image` / `text-to-video`），不硬编码：上游加模型即出现在 `/v1/models`，`pool_provider` 标成 `image` / `video`。把媒体模型当 chat 模型调会回 400 并指明该走哪个端点。
+- **积分双窗口**：`/accounts` 每行新增 `creditWindows`——`planBase`（capacity_type=4，按月清零）、`planBonus`（赠送包）、`runsOutAt` / `runsOutDays`（最近一个会过期的包）。积分详情弹窗直接显示「基础 X / 赠送 Y / 最早到期 …」。
+- **免费模型门**（`guards.free_models_only`）：开着时非 `FREE_CAP_MODELS` 的模型在网关侧直接 403，不碰上游、不占额度；`route/*` 选择器不受影响。
+- **harness 名清洗**（`prompt.scrub`）：出站 system/developer 里的 `Claude Code` / `Codex` / `Cursor` 等标识换成 `the assistant`，user 消息不动。与既有的 passthrough/custom/append 三种提示词模式正交。
+- 面板设置页新增「请求守卫」区块：两个复选框 + 保存，走 `/settings/save` 的 `guards` 与 `prompt` 段。
+
+**验证**：
+- `POST /v1/images/generations` 实测 200，`data[0].url` 落在上游 COS；`/v1/models` 116 项其中 4 个媒体模型（`hunyuan-image-alpha`、`hunyuan-image-alpha-edit`、`kling-video-v3`、`minimax-video-h3`）。
+- 视频：起任务 200（`status=queued`），同一 task 用属主号查 200（`in_progress`），换号 400「Not authorized」，落盘记录后二次查询命中属主。
+- 免费门：开 → `glm-5.1` 403（`free-models-only is enabled`）、`deepseek-v4.1-flash` 200；关 → 恢复。
+- 双窗口：`/accounts` 返回 `planBase/planBonus/runsOutAt/runsOutDays`，弹窗文本按 `基础 0 / 赠送 1304.83 / 最早到期 2026-12-15（17.5 天）` 渲染。
+- `test_version_sync.py` 两条用例通过：三处版本同为 1.8.31。
+
 ## 1.8.30（第三方通道可转发 + 面板补齐 + 四个洞）
 
 **症状**：第三方 OpenAI 兼容通道只有注册表，没有转发——`/v1/models` 里看不到 `ext/...`，客户端拿这个模型名直接 404。面板「第三方通道」页点任何按钮都报 `ReferenceError: loadThirdPartyChannels is not defined`，整页还是无样式裸列表。
