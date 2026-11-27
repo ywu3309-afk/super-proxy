@@ -16,6 +16,8 @@
 - 国内版 `deepseek-v4.1-flash` 及其付费 id `deepseek-v4.1-flash-sg` 纳入免费额度窗口联动：这模型有独立的 24h 免费 token 窗口（实测 ~2e8 被拒），窗口用满的 6004 现在会被持久记录下来，而不是重启即丢。
 - 临期积分优先调度补两个口子：签到奖励这类不在 summary 里的包也纳入候选（9 个额外包码表），日结切片包（`CapacityType=4`）从排序中排除——它每天零点统一重置，区分不出账号。
 
+**版本字面量**：`hub/wb_proxy.py` 的 `server_version` 同步到 1.8.29。它只影响 `/health` 报的 hub 版本，与更新判断无关（桌面壳用 `app.getVersion()` 比对 manifest），但两处版本字面量必须一致，`test/test_version_sync.py` 会对它做断言。
+
 **验证**：
 - 17 个已吊销号实测全部识别为 `12153`，`refreshRevokedAt` 落盘后重启，`accounts_ready` 稳定停在真实的 3 个（此前每次重启虚高到 18）。
 - 小额请求六种组合实测：无 effort + 64 → 不注入；1024 → 不注入；1025 → 注入 high；客户端显式 high + 64 → 保留客户端选择。
